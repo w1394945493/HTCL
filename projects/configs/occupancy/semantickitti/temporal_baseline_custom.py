@@ -142,6 +142,11 @@ lidar_root = "/c20250502/wangyushen/Datasets/kitti/semantickitti/dataset/sequenc
 lidarseg_root = "/c20250502/wangyushen/Datasets/kitti/semantickitti/dataset/lidarseg"
 label_mapping = "/vepfs-mlp2/c20250502/haoce/wangyushen/HTCL/data/semantickitti.yaml"
 
+# samples_per_gpu=2
+# workers_per_gpu=8
+samples_per_gpu=1
+workers_per_gpu=8
+
 
 file_client_args = dict(backend='disk')
 
@@ -152,21 +157,21 @@ bda_aug_conf = dict(
     flip_dy_ratio=0.5)
 
 train_pipeline = [
-    dict(type='LoadMultiViewImageFromFiles_SemanticKitti', is_train=True, colorjitter=False, 
+    dict(type='LoadMultiViewImageFromFiles_SemanticKitti', is_train=True, colorjitter=False,
          data_config=data_config, load_depth=False, img_norm_cfg=img_norm_cfg),
     dict(type='LoadSemKittiAnnotation', bda_aug_conf=bda_aug_conf, is_train=True),
     dict(type='CreateDepthFromLiDAR', point_cloud_range=point_cloud_range, grid_size=occ_size,lidar_root=lidar_root,lidarseg_root=lidarseg_root,label_mapping=label_mapping),
     dict(type='OccDefaultFormatBundle3D', class_names=class_names),
-    dict(type='Collect3D', keys=['img_inputs', 'gt_occ', 'points_occ', "points_uv"], 
+    dict(type='Collect3D', keys=['img_inputs', 'gt_occ', 'points_occ', "points_uv"],
             meta_keys=['pc_range', 'occ_size', 'sequence', ' frame_id', 'img_filename' ]),
 ]
 
 test_pipeline = [
-    dict(type='LoadMultiViewImageFromFiles_SemanticKitti', is_train=False, 
+    dict(type='LoadMultiViewImageFromFiles_SemanticKitti', is_train=False,
          data_config=data_config, load_depth=False, img_norm_cfg=img_norm_cfg),
     dict(type='LoadSemKittiAnnotation', bda_aug_conf=bda_aug_conf, is_train=False),
-    dict(type='OccDefaultFormatBundle3D', class_names=class_names, with_label=False), 
-    dict(type='Collect3D', keys=['img_inputs', 'gt_occ'], 
+    dict(type='OccDefaultFormatBundle3D', class_names=class_names, with_label=False),
+    dict(type='Collect3D', keys=['img_inputs', 'gt_occ'],
             meta_keys=[ 'pc_range', 'occ_size', 'sequence', ' frame_id', 'img_filename' ]),
 ]
 
@@ -192,8 +197,8 @@ test_config=dict(
 )
 
 data = dict(
-    samples_per_gpu=2,
-    workers_per_gpu=8,
+    samples_per_gpu=samples_per_gpu,
+    workers_per_gpu=workers_per_gpu,
     train=dict(
         type=dataset_type,
         data_root=data_root,
@@ -216,7 +221,7 @@ data = dict(
 
 optimizer = dict(
     type='AdamW',
-    lr=1e-4, 
+    lr=1e-4,
     weight_decay=0.01,
 )
 
