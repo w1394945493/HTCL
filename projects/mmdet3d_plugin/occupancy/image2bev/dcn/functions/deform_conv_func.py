@@ -10,7 +10,7 @@ from torch.autograd import Function
 from torch.nn.modules.utils import _triple
 from torch.autograd.function import once_differentiable
 
-import D3D
+from .. import D3D
 
 class DeformConvFunction(Function):
     @staticmethod

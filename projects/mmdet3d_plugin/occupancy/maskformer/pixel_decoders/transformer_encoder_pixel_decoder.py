@@ -8,7 +8,8 @@ from mmcv.cnn.bricks.transformer import (build_positional_encoding,
 from mmcv.runner import BaseModule, ModuleList
 from .pixel_decoder import PixelDecoder
 
-@PLUGIN_LAYERS.register_module()
+
+@PLUGIN_LAYERS.register_module(force=True)
 class TransformerEncoderPixelDecoder(PixelDecoder):
     """Pixel decoder with transormer encoder inside.
 

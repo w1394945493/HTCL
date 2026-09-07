@@ -3,3 +3,18 @@ output/
 ./output
 ./log
 .vscode
+# Python 编译缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Numba JIT 缓存
+*.nbc
+*.nbi
+
+# 测试和类型检查缓存
+.pytest_cache/
+.mypy_cache/
+
+**build
+**.so

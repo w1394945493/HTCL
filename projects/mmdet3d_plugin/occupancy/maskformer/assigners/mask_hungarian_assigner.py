@@ -6,7 +6,7 @@ from mmdet.core.bbox.builder import BBOX_ASSIGNERS
 from mmdet.core.bbox.match_costs.builder import build_match_cost
 from mmdet.core.bbox.assigners import AssignResult, BaseAssigner
 
-@BBOX_ASSIGNERS.register_module()
+@BBOX_ASSIGNERS.register_module(force=True)
 class MaskHungarianAssigner(BaseAssigner):
     """Computes one-to-one matching between predictions and ground truth for
     mask.

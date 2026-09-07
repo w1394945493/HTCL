@@ -8,7 +8,7 @@ from mmcv.cnn.bricks.transformer import (build_positional_encoding,
 from mmcv.runner import BaseModule, ModuleList
 
 
-@PLUGIN_LAYERS.register_module()
+@PLUGIN_LAYERS.register_module(force=True)
 class PixelDecoder(BaseModule):
     """Pixel decoder with a structure like fpn.
 

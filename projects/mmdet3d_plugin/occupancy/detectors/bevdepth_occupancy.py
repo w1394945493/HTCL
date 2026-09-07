@@ -133,7 +133,7 @@ class BEVDepthOccupancy(BEVDepth):
             t0 = time.time()
 
  
-        img_left, img_right = img[0][0], img[1][0]  ### B Temporal N C H W
+        img_left, img_right = img[0][0], img[1][0]  ### B Temporal N C H W # (1 4 1 3 384 1280) (1 4 1 3 384 1280)
         B, T, N, C, H, W = img_left.shape
 
         img_left_ref, img_right_ref = img_left[ :, -1, ... ], img_right[ :, -1, ... ]

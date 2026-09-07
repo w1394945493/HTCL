@@ -1,4 +1,4 @@
-#import open3d as o3d
+# import open3d as o3d
 import trimesh
 import mmcv
 import numpy as np
@@ -183,65 +183,72 @@ class CreateDepthFromOccupancy(object):
         plt.close()
         
         pdb.set_trace()
-    
-    
+
 
 @PIPELINES.register_module()
 class CreateDepthFromLiDAR(object):
-    def __init__(self, point_cloud_range, grid_size, projective_filter=True,
-            label_mapping="semantickitti.yaml"):
+
+    def __init__(
+        self,
+        point_cloud_range,
+        grid_size,
+        projective_filter=True,
+        lidar_root="data/occupancy/semanticKITTI/lidar/velodyne/dataset/sequences",
+        lidarseg_root="data/occupancy/semanticKITTI/lidar/lidarseg/dataset/sequences",
+        label_mapping="data/semantickitti.yaml",
+    ):
         self.grid_size = np.array(grid_size)
         self.point_cloud_range = torch.tensor(point_cloud_range)
         self.voxel_size = (self.point_cloud_range[3:] - self.point_cloud_range[:3]) / self.grid_size
-        
+
         self.class_names = [
             'unlabeled', 'car', 'bicycle', 'motorcycle', 'truck', 'other-vehicle',
             'person', 'bicyclist', 'motorcyclist', 'road', 'parking', 'sidewalk',
             'other-ground', 'building', 'fence', 'vegetation', 'trunk', 'terrain',
             'pole', 'traffic-sign'
         ]
-        
+
         # how to filter the query lidar points
         self.projective_filter = projective_filter
-        
-        self.lidar_root = "/code/data/occupancy/semanticKITTI/lidar/velodyne/dataset/sequences"
-        self.lidarseg_root = "/code/data/occupancy/semanticKITTI/lidar/lidarseg/dataset/sequences"
-          
+
+        self.lidar_root = lidar_root
+        self.lidarseg_root = lidarseg_root
+
         # mappings of training ids
         with open(label_mapping, 'r') as stream:
             semkittiyaml = yaml.safe_load(stream)
         self.learning_map = semkittiyaml['learning_map']
-        
+
     def project_points(self, points, rots, trans, intrins, post_rots, post_trans):
         # from lidar to camera
         points = points.view(-1, 1, 3)
         points = points - trans.view(1, -1, 3)
         inv_rots = rots.inverse().unsqueeze(0)
         points = (inv_rots @ points.unsqueeze(-1))
-        
+
         # from camera to raw pixel
         points = torch.cat((points, torch.ones((points.shape[0], 1, 1, 1))), dim=2)
         points = (intrins.unsqueeze(0) @ points).squeeze(-1)
         points_d = points[..., 2:3]
         points_uv = points[..., :2] / points_d
-        
+
         # from raw pixel to transformed pixel
         points_uv = post_rots[:, :2, :2].unsqueeze(0) @ points_uv.unsqueeze(-1)
         points_uv = points_uv.squeeze(-1) + post_trans[..., :2].unsqueeze(0)
         points_uvd = torch.cat((points_uv, points_d), dim=2)
-        
+
         return points_uvd
 
     def __call__(self, results):
         ####################--------------------------1----------------------------#########################
         img_filename = results['img_filename'][0]
         seq_id, _, filename = img_filename.split("/")[-3:]
-        
+
         # loading lidar points
         lidar_filename = os.path.join(self.lidar_root, seq_id, "velodyne", filename.replace(".png", ".bin"))
         lidar_points = np.fromfile(lidar_filename, dtype=np.float32).reshape(-1, 4)
         lidar_points = torch.from_numpy(lidar_points[:, :3]).float()
-        
+
         # loading lidarseg labels
         lidarseg_filename = os.path.join(self.lidarseg_root, seq_id, "labels", filename.replace(".png", ".label"))
         lidarseg = np.fromfile(lidarseg_filename, dtype=np.uint32).reshape((-1, 1))
@@ -250,11 +257,11 @@ class CreateDepthFromLiDAR(object):
         # 0: ignored, 1 - 19 are valid labels
         lidarseg = torch.from_numpy(lidarseg.astype(np.int32)).float()
         flatten_seg = lidarseg.flatten()
-        
+
         # project voxels onto the image plane
         imgs, rots, trans, intrins, post_rots, post_trans = results['img_inputs'][0][:6]
         projected_points = self.project_points(lidar_points, rots, trans, intrins, post_rots, post_trans)[:, 0]
-        
+
         # create depth map
         img_h, img_w = imgs[0].shape[-2:]
         valid_mask = (projected_points[:, 0] >= 0) & \
@@ -262,7 +269,7 @@ class CreateDepthFromLiDAR(object):
                     (projected_points[:, 0] <= img_w - 1) & \
                     (projected_points[:, 1] <= img_h - 1) & \
                     (projected_points[:, 2] > 0)
-        
+
         # perform bird-eye-view augmentation for lidar_points
         bda_mat = results['img_inputs'][0][6]
         if bda_mat.shape[-1] == 4:
@@ -271,7 +278,7 @@ class CreateDepthFromLiDAR(object):
             lidar_points = homo_lidar_points[:, :3]
         else:
             lidar_points = lidar_points @ bda_mat.t()
-        
+
         # perform range mask
         range_valid_mask = (lidar_points >= self.point_cloud_range[:3]) & (lidar_points <= self.point_cloud_range[3:])
         range_valid_mask = range_valid_mask.all(dim=1)
@@ -279,13 +286,13 @@ class CreateDepthFromLiDAR(object):
         #     # query points are visible from both voxels and images
         #     lidarseg_mask = range_valid_mask & valid_mask
         # else:
-        #     # only require that query points are inside the voxel range, which possibly more suits the occupancy target 
+        #     # only require that query points are inside the voxel range, which possibly more suits the occupancy target
         #     lidarseg_mask = range_valid_mask
-        
+
         lidarseg_mask = valid_mask
         lidarseg = torch.cat((lidar_points, lidarseg), dim=1)[lidarseg_mask]
         results['points_occ'] = lidarseg
-        
+
         '''
         A simple validation, sampling the corresponding label in voxel for each point and check the consistency
         '''
@@ -294,15 +301,15 @@ class CreateDepthFromLiDAR(object):
         # voxel_labels = results['gt_occ'].float()
         # sampled_labels = torch.nn.functional.grid_sample(voxel_labels.unsqueeze(0).unsqueeze(0), norm_points.view(1, -1, 1, 1, 3), mode='nearest')
         # sampled_labels = sampled_labels.squeeze()
-        
+
         # match_valid_mask = (lidarseg[:, -1] > 0) & (sampled_labels > 0) & (sampled_labels < 255)
         # gt_labels = lidarseg[match_valid_mask, -1]
         # sampled_labels = sampled_labels[match_valid_mask]
-        
+
         # # print(torch.unique(gt_labels, return_counts=True))
         # # print(torch.unique(sampled_labels, return_counts=True))
         # print('match ratio = {:.2f}'.format((gt_labels == sampled_labels).sum().item() / sampled_labels.shape[0] * 100))
-        
+
         points_uvd = projected_points[lidarseg_mask]
         points_uvd[..., 0] /= img_w
         points_uvd[..., 1] /= img_h
@@ -318,7 +325,7 @@ class CreateDepthFromLiDAR(object):
         depth_order = torch.argsort(depth_projected_points[:, 2], descending=True)
         depth_projected_points = depth_projected_points[depth_order]
         img_depth[depth_projected_points[:, 1].round().long(), depth_projected_points[:, 0].round().long()] = depth_projected_points[:, 2]
-        
+
         '''
         create image-view segmentation, label 0 is unlabeled,
         therefore we should only consider foreground classes (> 0)
@@ -334,21 +341,21 @@ class CreateDepthFromLiDAR(object):
         flatten_seg = flatten_seg[seg_order]
         img_seg[seg_projected_points[:, 1].round().long(), seg_projected_points[:, 0].round().long()] = flatten_seg
         results['img_seg'] = img_seg
-        
+
         # self.visualize(results['canvas'], img_depth, img_seg,out_path='debug_lidar_projections')  ################### 可视化
-        
+
         imgs, rots, trans, intrins, post_rots, post_trans, bda_rot, gt_depths, sensor2sensors, calib, filenamesl = results['img_inputs'][0]
         tmp1 = [imgs, rots, trans, intrins, post_rots, post_trans, bda_rot, img_depth.unsqueeze(0), sensor2sensors, calib, filenamesl]
 
         ####################--------------------------2----------------------------#########################
         img_filename = results['img_filename'][1]
         seq_id, _, filename = img_filename.split("/")[-3:]
-        
+
         # loading lidar points
         lidar_filename = os.path.join(self.lidar_root, seq_id, "velodyne", filename.replace(".png", ".bin"))
         lidar_points = np.fromfile(lidar_filename, dtype=np.float32).reshape(-1, 4)
         lidar_points = torch.from_numpy(lidar_points[:, :3]).float()
-        
+
         # loading lidarseg labels
         lidarseg_filename = os.path.join(self.lidarseg_root, seq_id, "labels", filename.replace(".png", ".label"))
         lidarseg = np.fromfile(lidarseg_filename, dtype=np.uint32).reshape((-1, 1))
@@ -357,11 +364,11 @@ class CreateDepthFromLiDAR(object):
         # 0: ignored, 1 - 19 are valid labels
         lidarseg = torch.from_numpy(lidarseg.astype(np.int32)).float()
         flatten_seg = lidarseg.flatten()
-        
+
         # project voxels onto the image plane
         imgs, rots, trans, intrins, post_rots, post_trans = results['img_inputs'][1][:6]
         projected_points = self.project_points(lidar_points, rots, trans, intrins, post_rots, post_trans)[:, 0]
-        
+
         # create depth map
         img_h, img_w = imgs[0].shape[-2:]
         valid_mask = (projected_points[:, 0] >= 0) & \
@@ -369,7 +376,7 @@ class CreateDepthFromLiDAR(object):
                     (projected_points[:, 0] <= img_w - 1) & \
                     (projected_points[:, 1] <= img_h - 1) & \
                     (projected_points[:, 2] > 0)
-        
+
         # perform bird-eye-view augmentation for lidar_points
         bda_mat = results['img_inputs'][0][6]
         if bda_mat.shape[-1] == 4:
@@ -378,7 +385,7 @@ class CreateDepthFromLiDAR(object):
             lidar_points = homo_lidar_points[:, :3]
         else:
             lidar_points = lidar_points @ bda_mat.t()
-        
+
         # perform range mask
         range_valid_mask = (lidar_points >= self.point_cloud_range[:3]) & (lidar_points <= self.point_cloud_range[3:])
         range_valid_mask = range_valid_mask.all(dim=1)
@@ -386,14 +393,13 @@ class CreateDepthFromLiDAR(object):
         #     # query points are visible from both voxels and images
         #     lidarseg_mask = range_valid_mask & valid_mask
         # else:
-        #     # only require that query points are inside the voxel range, which possibly more suits the occupancy target 
+        #     # only require that query points are inside the voxel range, which possibly more suits the occupancy target
         #     lidarseg_mask = range_valid_mask
-        
+
         lidarseg_mask = valid_mask
         lidarseg = torch.cat((lidar_points, lidarseg), dim=1)[lidarseg_mask]
         results['points_occ'] = lidarseg
-        
-        
+
         points_uvd = projected_points[lidarseg_mask]
         points_uvd[..., 0] /= img_w
         points_uvd[..., 1] /= img_h
@@ -430,51 +436,48 @@ class CreateDepthFromLiDAR(object):
         img_seg[seg_projected_points[:, 1].round().long(), seg_projected_points[:, 0].round().long()] = flatten_seg
         results['img_seg'] = img_seg  
 
-        
         imgs, rots, trans, intrins, post_rots, post_trans, bda_rot, gt_depths, sensor2sensors, calib , filenamesr = results['img_inputs'][1]
-        
+
         tmp2 = [imgs, rots, trans, intrins, post_rots, post_trans, bda_rot, img_depth.unsqueeze(0), sensor2sensors, calib, filenamesr]
         results['img_inputs'] = [tmp1,tmp2]
-        
-               
+
         return results
-        
 
     def visualize(self, img, img_depth, img_seg, out_path='debug_lidar_projections'):
-        
+
         os.makedirs(out_path, exist_ok=True)
-        
+
         import matplotlib.pyplot as plt
-        
+
         # convert depth-map to depth-points
         depth_points = torch.nonzero(img_depth)
         depth_points = torch.stack((depth_points[:, 1], depth_points[:, 0], img_depth[depth_points[:, 0], depth_points[:, 1]]), dim=1)
-        
+
         # overlay image with depth
         plt.figure(dpi=300)
         plt.imshow(img)
         plt.scatter(depth_points[:, 0], depth_points[:, 1], s=1, c=depth_points[:, 2], alpha=0.5)
         plt.axis('off')
         plt.title('Image Depth')
-        
+
         plt.savefig(os.path.join(out_path, 'demo_depth.png'))
         plt.close()
-        
+
         # overlay image with seg
         alpha = 0.5
         img_color_seg = color_seg(img_seg).numpy().astype(np.uint8)
         img_seg_mask = (img_seg > 0)
         blend_img_seg = img.copy()
         blend_img_seg[img_seg_mask] = alpha * blend_img_seg[img_seg_mask] + (1 - alpha) * img_color_seg[img_seg_mask]
-        
+
         plt.figure(dpi=300)
         plt.imshow(blend_img_seg)
         plt.axis('off')
         plt.title('Image Seg')
-        
+
         plt.savefig(os.path.join(out_path, 'demo_seg.png'))
         plt.close()
-        
+
         # show imgseg == 0
         imgseg_zero_points = torch.nonzero(img_seg == 0)
         # overlay image with depth
@@ -483,10 +486,10 @@ class CreateDepthFromLiDAR(object):
         plt.scatter(imgseg_zero_points[:, 1], imgseg_zero_points[:, 0], s=1, c='r', alpha=0.5)
         plt.axis('off')
         plt.title('Image Seg 0')
-        
+
         plt.savefig(os.path.join(out_path, 'demo_seg_0.png'))
         plt.close()
-        
+
         # show imgseg == 255
         imgseg_ignore_points = torch.nonzero(img_seg == 255)
         # overlay image with depth
@@ -495,10 +498,10 @@ class CreateDepthFromLiDAR(object):
         plt.scatter(imgseg_ignore_points[:, 1], imgseg_ignore_points[:, 0], s=1, c='r', alpha=0.5)
         plt.axis('off')
         plt.title('Image Seg 255')
-        
+
         plt.savefig(os.path.join(out_path, 'demo_seg_255.png'))
         plt.close()
-        
+
         # pdb.set_trace()
 
 
@@ -532,4 +535,3 @@ def color_seg(seg):
         output[cls_mask] = torch.tensor(color[:3]).float()
     
     return output
-        

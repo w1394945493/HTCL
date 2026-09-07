@@ -17,7 +17,7 @@ from .mmdet_utils import get_uncertain_point_coords_with_randomness
 from .anchor_free_head import AnchorFreeHead
 from .maskformer_head import MaskFormerHead
 
-@HEADS.register_module()
+@HEADS.register_module(force=True)
 class Mask2FormerHead(MaskFormerHead):
     """Implements the Mask2Former head.
 
