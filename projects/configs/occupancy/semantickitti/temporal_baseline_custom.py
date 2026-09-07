@@ -146,7 +146,9 @@ label_mapping = "/vepfs-mlp2/c20250502/haoce/wangyushen/HTCL/data/semantickitti.
 # workers_per_gpu=8
 samples_per_gpu=1
 workers_per_gpu=8
-
+max_epochs=30
+max_keep_ckpts=1
+interval=1
 
 file_client_args = dict(backend='disk')
 
@@ -233,8 +235,8 @@ lr_config = dict(
     step=[20, 25],
 )
 
-checkpoint_config = dict(max_keep_ckpts=30, interval=1)
-runner = dict(type='EpochBasedRunner', max_epochs=30)
+checkpoint_config = dict(max_keep_ckpts=max_keep_ckpts, interval=interval)
+runner = dict(type='EpochBasedRunner', max_epochs=max_epochs)
 
 evaluation = dict(
     interval=1,
