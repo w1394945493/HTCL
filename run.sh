@@ -33,8 +33,15 @@ python /vepfs-mlp2/c20250502/haoce/wangyushen/HTCL/tools/test.py \
   --out /vepfs-mlp2/c20250502/haoce/wangyushen/Outputs/htcl/val/ \
   --eval mAP
 
-# *============================================================#
 # * 多卡训练
+export CUDA_VISIBLE_DEVICES=0,1
+PYTHONPATH="$(pwd):${PYTHONPATH:-}" \
+torchrun --nproc_per_node=2 tools/train.py \
+    projects/configs/occupancy/semantickitti/temporal_baseline_custom.py \
+    --launcher pytorch \ 
+    --work-dir /vepfs-mlp2/c20250502/haoce/wangyushen/Outputs/htcl/train
+
+# 火山服务器
 cd /vepfs-mlp2/c20250502/haoce/wangyushen/HTCL
 . /root/miniconda3/bin/activate
 conda activate /vepfs-mlp2/c20250502/haoce/conda_env/wys_temp_2
