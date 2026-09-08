@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 import math
 import mmcv
-import collections 
+import collections
 
 from mmdet.models import DETECTORS
 from mmdet3d.models import builder, losses
@@ -38,61 +38,62 @@ class FuseNet(nn.Module):
         x1= self.conv0(x)
         x2= self.conv1(x1)
         # x3 = x*self.sigmoid(x2)
-        out = self.conv2(x2) 
+        out = self.conv2(x2)
         return out
-        
+
 @DETECTORS.register_module()
 class BEVDepthOccupancy(BEVDepth):
-    def __init__(self, 
+    def __init__(self,
             loss_cfg=None,
             use_grid_mask=False,
             disable_loss_depth=False,
             queue_length=None,
             **kwargs):
         super().__init__(**kwargs)
-  
+
         # if queue_length>1:
         #     self.FuseNet = FuseNet(in_channel=3)
-        
+
         self.loss_cfg = loss_cfg
         self.use_grid_mask = use_grid_mask
         self.disable_loss_depth = disable_loss_depth
-        
+
         self.grid_mask = GridMask(
             True, True, rotate=1, offset=False, ratio=0.5, mode=1, prob=0.7)
-        
+
         self.record_time = False
         self.time_stats = collections.defaultdict(list)
-    
+
     def image_encoder(self, img):
         imgs = img
-        B, N, C, imH, imW = imgs.shape   
+        B, N, C, imH, imW = imgs.shape
         imgs = imgs.view(B * N, C, imH, imW)
-        
+
         if self.use_grid_mask:
             imgs = self.grid_mask(imgs)
-        
-        x = self.img_backbone(imgs) 
+        # * 使用 EfficientNet-B7 主干提取多尺度图像特征
+        x = self.img_backbone(imgs)
 
+        # * 使用 SECONDFPN 对多尺度特征进行上采样与融合
         if self.with_img_neck:
             x = self.img_neck(x)
             if type(x) in [list, tuple]:
                 x = x[0]
         _, output_dim, ouput_H, output_W = x.shape
         x = x.view(B, N, output_dim, ouput_H, output_W)
-        
+
         return x
-    
+
 
     def image_encoder_source(self, img):
         imgs = img
-        B, N, C, imH, imW = imgs.shape   
+        B, N, C, imH, imW = imgs.shape
         imgs = imgs.view(B * N, C, imH, imW)
-        
+
         if self.use_grid_mask:
             imgs = self.grid_mask(imgs)
-        
-        x = self.img_backbone(imgs) 
+
+        x = self.img_backbone(imgs)
 
         if self.with_img_neck:
             x = self.img_neck(x)
@@ -100,53 +101,53 @@ class BEVDepthOccupancy(BEVDepth):
                 x = x[0]
         _, output_dim, ouput_H, output_W = x.shape
         x = x.view(B, N, output_dim, ouput_H, output_W)
-        
+
         return x
 
     @force_fp32()
-    def bev_encoder(self, x, depth, temporal_voxel):  
+    def bev_encoder(self, x, depth, temporal_voxel):
         if self.record_time:
             torch.cuda.synchronize()
             t0 = time.time()
-        
-        x = self.img_bev_encoder_backbone(x)  
-        
+
+        x = self.img_bev_encoder_backbone(x)
+
         if self.record_time:
             torch.cuda.synchronize()
             t1 = time.time()
             self.time_stats['bev_encoder'].append(t1 - t0)
-        
-        x = self.img_bev_encoder_neck(x, depth ,temporal_voxel)  
-        
+
+        x = self.img_bev_encoder_neck(x, depth ,temporal_voxel)
+
         if self.record_time:
             torch.cuda.synchronize()
             t2 = time.time()
             self.time_stats['bev_neck'].append(t2 - t1)
-        
+
         return x
-    
+
     def extract_img_feat(self, img, img_metas, gt, mode):
         """Extract features of images."""
-        
+
         if self.record_time:
             torch.cuda.synchronize()
             t0 = time.time()
 
- 
+
         img_left, img_right = img[0][0], img[1][0]  ### B Temporal N C H W # (1 4 1 3 384 1280) (1 4 1 3 384 1280)
         B, T, N, C, H, W = img_left.shape
 
         img_left_ref, img_right_ref = img_left[ :, -1, ... ], img_right[ :, -1, ... ]
         img_left_sour, img_right_sour = img_left[:,:-1, ... ].squeeze(2).contiguous(), img_right[:,:-1, ... ].squeeze(2).contiguous()
 
-        img_left_ref_feature = self.image_encoder( img_left_ref ) 
-      
+        # * 仅编码当前参考帧：EfficientNet-B7 + SECONDFPN 对应论文中的图像特征提取网络
+        img_left_ref_feature = self.image_encoder( img_left_ref )
 
-        x, x2 = img_left_ref_feature, None 
+        x, x2 = img_left_ref_feature, None
         img_feats = x.clone()
-         
+
         img, img2 = img[0], img[1]
-        filenamesl, filenamesr = img[-1], img2[-1] 
+        filenamesl, filenamesr = img[-1], img2[-1]
 
 
         if self.record_time:
@@ -155,39 +156,39 @@ class BEVDepthOccupancy(BEVDepth):
             self.time_stats['img_encoder'].append(t1 - t0)
 
         # img: imgs, rots, trans, intrins, post_rots, post_trans, gt_depths, sensor2sensors
-        rots, trans, intrins, post_rots, post_trans, bda = img[1:7]  
+        rots, trans, intrins, post_rots, post_trans, bda = img[1:7]
         rots2, trans2, intrins2, post_rots2, post_trans2, bda2 = img2[1:7]
-        
-        
-        mlp_input = self.img_view_transformer.get_mlp_input(rots, trans, intrins, post_rots, post_trans, bda)   
-        mlp_input2 = self.img_view_transformer.get_mlp_input(rots2, trans2, intrins2, post_rots2, post_trans2, bda2)  
-        
-        geo_inputs = [rots, trans, intrins, post_rots, post_trans, bda, mlp_input]   
-        geo_inputs2 = [rots2, trans2, intrins2, post_rots2, post_trans2, bda2, mlp_input2]   
+
+
+        mlp_input = self.img_view_transformer.get_mlp_input(rots, trans, intrins, post_rots, post_trans, bda)
+        mlp_input2 = self.img_view_transformer.get_mlp_input(rots2, trans2, intrins2, post_rots2, post_trans2, bda2)
+
+        geo_inputs = [rots, trans, intrins, post_rots, post_trans, bda, mlp_input]
+        geo_inputs2 = [rots2, trans2, intrins2, post_rots2, post_trans2, bda2, mlp_input2]
 
         calib = img[9]
-        
-        x, depth, temporal_voxel = self.img_view_transformer([x] + geo_inputs + [x2] + geo_inputs2 + [calib]+ [img, img2], gt, mode, img[0], img2[0], filenamesl, filenamesr)  
+
+        x, depth, temporal_voxel = self.img_view_transformer([x] + geo_inputs + [x2] + geo_inputs2 + [calib]+ [img, img2], gt, mode, img[0], img2[0], filenamesl, filenamesr)
 
 
         if self.record_time:
             torch.cuda.synchronize()
             t2 = time.time()
             self.time_stats['view_transformer'].append(t2 - t1)
-        
+
         x = self.bev_encoder(x, depth, temporal_voxel)
         if type(x) is not list:
             x = [x]
-        
+
         return x, depth, img_feats, temporal_voxel
 
     def extract_feat(self, points, img, img_metas, gt, mode):
         """Extract features from images and points."""
-        
+
         voxel_feats, depth, img_feats, temporal_voxel = self.extract_img_feat(img, img_metas, gt, mode)
         pts_feats = None
         return (voxel_feats, img_feats, depth, temporal_voxel )
-    
+
     @force_fp32(apply_to=('pts_feats'))
     def forward_pts_train(
             self,
@@ -199,11 +200,11 @@ class BEVDepthOccupancy(BEVDepth):
             points_uv=None,
             **kwargs,
         ):
-        
+
         if self.record_time:
             torch.cuda.synchronize()
             t0 = time.time()
-        
+
         outs = self.pts_bbox_head(
             voxel_feats=pts_feats,
             points=points_occ,
@@ -212,12 +213,12 @@ class BEVDepthOccupancy(BEVDepth):
             points_uv=points_uv,
             **kwargs,
         )
-        
+
         if self.record_time:
             torch.cuda.synchronize()
             t1 = time.time()
             self.time_stats['occ_head'].append(t1 - t0)
-        
+
         losses = self.pts_bbox_head.loss(
             output_voxels=outs['output_voxels'],
             target_voxels=gt_occ,
@@ -226,16 +227,16 @@ class BEVDepthOccupancy(BEVDepth):
             img_metas=img_metas,
             **kwargs,
         )    ## gt_occ 1, 256, 256, 32   points_occ[20120, 4]
-        
+
         if self.record_time:
             torch.cuda.synchronize()
             t2 = time.time()
             self.time_stats['loss_occ'].append(t2 - t1)
-        
+
         return losses
 
 
-    
+
     def forward_train(self,
             points=None,
             img_metas=None,
@@ -273,43 +274,43 @@ class BEVDepthOccupancy(BEVDepth):
         # extract bird-eye-view features from perspective images
         voxel_feats, img_feats, depth, temporal_voxel = self.extract_feat(
             points, img=img_inputs, img_metas=img_metas, gt=img_inputs[0][7].clone(), mode='train')
-        
+
         # training losses
         losses = dict()
-        
-        if self.record_time:        
+
+        if self.record_time:
             torch.cuda.synchronize()
             t0 = time.time()
-        
+
         if not self.disable_loss_depth: ## True
-            losses['loss_depth'] = self.img_view_transformer.get_depth_loss(img_inputs[0][7].clone(), depth)  
+            losses['loss_depth'] = self.img_view_transformer.get_depth_loss(img_inputs[0][7].clone(), depth)
 
 
         if self.record_time:
             torch.cuda.synchronize()
             t1 = time.time()
             self.time_stats['loss_depth'].append(t1 - t0)
-            
+
         if self.img_bev_encoder_backbone.crp3d:
             losses['loss_rel_ce'] = self.img_bev_encoder_backbone.crp_loss(
                 CP_mega_matrices=kwargs['CP_mega_matrix'],
             )
-        
+
         if self.img_view_transformer.imgseg:
             losses['loss_imgseg'] = self.img_view_transformer.get_seg_loss(
                 seg_labels=kwargs['img_seg'],
             )
-        
+
 
         ## voxel_feats [4, 384, 128, 128, 16]  gt_occ[4, 256, 256, 32]
-        losses_occupancy = self.forward_pts_train(voxel_feats, gt_occ, 
+        losses_occupancy = self.forward_pts_train(voxel_feats, gt_occ,
                         points_occ, img_metas, img_feats=img_feats, points_uv=points_uv, **kwargs)  \
-        
+
         losses_occupancy2 = self.forward_pts_train(temporal_voxel, gt_occ,  points_occ, img_metas, img_feats=img_feats, points_uv=points_uv, **kwargs)
         for key,value in losses_occupancy2.items():  losses_occupancy[key] += value
 
         losses.update(losses_occupancy)
-        
+
         def logging_latencies():
             # logging latencies
             avg_time = {key: sum(val) / len(val) for key, val in self.time_stats.items()}
@@ -317,25 +318,25 @@ class BEVDepthOccupancy(BEVDepth):
             out_res = ''
             for key, val in avg_time.items():
                 out_res += '{}: {:.4f}, {:.1f}, '.format(key, val, val / sum_time)
-            
+
             print(out_res)
-        
+
         if self.record_time:
             logging_latencies()
-        
+
         return losses
-        
+
     def forward_test(self,
             img_metas=None,
             img_inputs=None,
             **kwargs,
         ):
-        
+
         return self.simple_test(img_metas, img_inputs, **kwargs)
-    
+
     def simple_test(self, img_metas, img=None, rescale=False, points_occ=None, gt_occ=None, points_uv=None):
-        
-        voxel_feats, img_feats, depth, temporal_voxel = self.extract_feat(points=None, img=img, img_metas=img_metas, gt=None, mode='val')        
+
+        voxel_feats, img_feats, depth, temporal_voxel = self.extract_feat(points=None, img=img, img_metas=img_metas, gt=None, mode='val')
         output = self.pts_bbox_head(
             voxel_feats=voxel_feats,
             points=points_occ,
@@ -343,30 +344,31 @@ class BEVDepthOccupancy(BEVDepth):
             img_feats=img_feats,
             points_uv=points_uv,
         )
-        
+
         # evaluate nusc lidar-seg
         if output['output_points'] is not None and points_occ is not None:
             output['evaluation_semantic'] = self.simple_evaluation_semantic(output['output_points'], points_occ, img_metas)
         else:
             output['evaluation_semantic'] = 0
-            
-        # evaluate voxel 
-        output['output_voxels'] = F.interpolate(output['output_voxels'][0], 
+
+        # * 将低分辨率体素分类 logits 三线性上采样至标注体素尺寸
+        # evaluate voxel
+        output['output_voxels'] = F.interpolate(output['output_voxels'][0],
                     size=gt_occ.shape[1:], mode='trilinear', align_corners=False)
         output['target_voxels'] = gt_occ
-        
+
         output['target_depth'] = img[0][7].clone()
         output['output_depth'] = depth
-        
-        
+
+
         return output
-    
+
     def post_process_semantic(self, pred_occ):
         if type(pred_occ) == list:
             pred_occ = pred_occ[-1]
-        
+
         score, color = torch.max(torch.softmax(pred_occ, dim=1), dim=1)
-        
+
         return color
 
     def simple_evaluation_semantic(self, pred, gt, img_metas):
@@ -374,29 +376,29 @@ class BEVDepthOccupancy(BEVDepth):
         gt = gt[0].cpu().numpy()
         gt = gt[:, 3].astype(np.int)
         unique_label = np.arange(16)
-        
+
         hist = fast_hist_crop(pred, gt, unique_label)
-        
+
         return hist
-    
+
     def evaluation_semantic(self, pred, gt, img_metas):
         import open3d as o3d
 
         assert pred.shape[0] == 1
         pred = pred[0]
         gt_ = gt[0].cpu().numpy()
-        
+
         x = np.linspace(0, pred.shape[0] - 1, pred.shape[0])
         y = np.linspace(0, pred.shape[1] - 1, pred.shape[1])
         z = np.linspace(0, pred.shape[2] - 1, pred.shape[2])
-    
+
         X, Y, Z = np.meshgrid(x, y, z,  indexing='ij')
         vv = np.stack([X, Y, Z], axis=-1)
         pred_fore_mask = pred > 0
-        
+
         if pred_fore_mask.sum() == 0:
             return None
-        
+
         # select foreground 3d voxel vertex
         vv = vv[pred_fore_mask]
         vv[:, 0] = (vv[:, 0] + 0.5) * (img_metas['pc_range'][3] - img_metas['pc_range'][0]) /  img_metas['occ_size'][0]  + img_metas['pc_range'][0]
@@ -405,22 +407,22 @@ class BEVDepthOccupancy(BEVDepth):
 
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(vv)
-        
+
         # for every lidar point, search its nearest *foreground* voxel vertex as the semantic prediction
         kdtree = o3d.geometry.KDTreeFlann(pcd)
         indices = []
-        
+
         for vert in gt_[:, :3]:
             _, inds, _ = kdtree.search_knn_vector_3d(vert, 1)
             indices.append(inds[0])
-        
+
         gt_valid = gt_[:, 3].astype(np.int)
         pred_valid = pred[pred_fore_mask][np.array(indices)]
-        
+
         mask = gt_valid > 0
         cm = CM(gt_valid[mask] - 1, pred_valid[mask] - 1, labels=np.arange(16))
         cm = cm.astype(np.float32)
-        
+
         return cm
 
 
@@ -437,7 +439,7 @@ class BEVDepthOccupancy(BEVDepth):
         # cam_to_ego
         points = torch.cat((points[:, :, :, :, :, :2] * points[:, :, :, :, :, 2:3],
                             points[:, :, :, :, :, 2:3]
-                            ), 5)  
+                            ), 5)
         if intrins.shape[3] == 4: # for KITTI
             shift = intrins[:, :, :3, 3]
             points = points - shift.view(B, N, 1, 1, 1, 3, 1)
@@ -497,14 +499,14 @@ class BEVDepthOccupancy(BEVDepth):
 
 @DETECTORS.register_module()
 class BEVDepthOccupancy4D(BEVDepthOccupancy):
-    def prepare_voxel_feat(self, img, rot, tran, intrin, 
+    def prepare_voxel_feat(self, img, rot, tran, intrin,
                 post_rot, post_tran, bda, mlp_input):
-        
+
         x = self.image_encoder(img)
         img_feats = x.clone()
-        
+
         voxel_feat, depth = self.img_view_transformer([x, rot, tran, intrin, post_rot, post_tran, bda, mlp_input])
-        
+
         return voxel_feat, depth, img_feats
 
     def extract_img_feat(self, img, img_metas):
@@ -528,10 +530,10 @@ class BEVDepthOccupancy4D(BEVDepthOccupancy):
         img_feat_list = []
         depth_list = []
         key_frame = True # back propagation for key frame only
-        
+
         for img, rot, tran, intrin, post_rot, \
             post_tran in zip(imgs, rots, trans, intrins, post_rots, post_trans):
-                
+
             mlp_input = self.img_view_transformer.get_mlp_input(
                 rots[0], trans[0], intrin,post_rot, post_tran, bda)
             inputs_curr = (img, rot, tran, intrin, post_rot, post_tran, bda, mlp_input)
@@ -540,16 +542,15 @@ class BEVDepthOccupancy4D(BEVDepthOccupancy):
                     voxel_feat, depth, img_feats = self.prepare_voxel_feat(*inputs_curr)
             else:
                 voxel_feat, depth, img_feats = self.prepare_voxel_feat(*inputs_curr)
-            
+
             voxel_feat_list.append(voxel_feat)
             img_feat_list.append(img_feats)
             depth_list.append(depth)
             key_frame = False
-        
+
         voxel_feat = torch.cat(voxel_feat_list, dim=1)
         x = self.bev_encoder(voxel_feat)
         if type(x) is not list:
             x = [x]
 
         return x, depth_list[0], img_feat_list[0]
-        

@@ -26,43 +26,44 @@ class Build_gwc_volume_unfold(nn.Module):
         volume = (refimg_fea*unfolded_targetimg_fea).sum(2)
         volume = torch.flip(volume, [2])
         return volume
-    
 
-    
+
+# * Cross-frame Pattern Affinity（CPA）：提取当前帧与历史帧的多尺度局部模式
+# * 当前帧分支：使用不同膨胀率的 2D 卷积提取多尺度 pattern
 class multi_patch2d(nn.Module):
     def __init__(self, in_channel=32, out_channel=None, depth=8):
         super(multi_patch2d, self).__init__()
         self.atrous_block1 = nn.Conv2d(in_channel, depth, 3, 1, padding=1, dilation=1)
         self.atrous_block2 = nn.Conv2d(in_channel, depth, 3, 1, padding=2, dilation=2)
         self.atrous_block4 = nn.Conv2d(in_channel, depth, 3, 1, padding=4, dilation=4)
-     
-    def forward(self, x):
+
+    def forward(self, x): # * 聚合不同 dilation 下的当前帧局部 pattern
         atrous_block1 = self.atrous_block1(x)
         atrous_block2 = self.atrous_block2(x)
         atrous_block4 = self.atrous_block4(x)
         net = torch.cat([ atrous_block1, atrous_block2, atrous_block4 ], dim=1)
-     
-        return net
-    
 
+        return net
+
+# * 历史帧分支：使用不同膨胀率的 3D 卷积提取对齐时序体的多尺度 pattern
 class multi_patch3d(nn.Module):
     def __init__(self, in_channel=32, out_channel=None, depth=8):
         super(multi_patch3d, self).__init__()
-        self.atrous_block1 = nn.Sequential( nn.Conv3d(in_channel, depth, 3, 1, padding=1, dilation=1), 
-                            nn.GELU(), nn.GroupNorm(1, depth) )  
-        self.atrous_block2 = nn.Sequential( nn.Conv3d(in_channel, depth, 3, 1, padding=2, dilation=2), 
+        self.atrous_block1 = nn.Sequential( nn.Conv3d(in_channel, depth, 3, 1, padding=1, dilation=1),
+                            nn.GELU(), nn.GroupNorm(1, depth) )
+        self.atrous_block2 = nn.Sequential( nn.Conv3d(in_channel, depth, 3, 1, padding=2, dilation=2),
                             nn.GELU(), nn.GroupNorm(1, depth) )
         self.atrous_block4 = nn.Sequential( nn.Conv3d(in_channel, depth, 3, 1, padding=4, dilation=4),
                             nn.GELU(), nn.GroupNorm(1, depth) )
- 
+
     def forward(self, x):
         atrous_block1 = self.atrous_block1(x)
         atrous_block2 = self.atrous_block2(x)
         atrous_block4 = self.atrous_block4(x)
         net = torch.cat([ atrous_block1, atrous_block2, atrous_block4 ], dim=1)
-    
+
         return net
-    
+
 class AffinityFeature(nn.Module):
     def __init__(self, win_h=3, win_w=3, dilation=1  ):
         super(AffinityFeature, self).__init__()
@@ -97,19 +98,19 @@ class multipatch_affinity(nn.Module):
         self.affinity1 = AffinityFeature(dilation=1)
         self.affinity2 = AffinityFeature(dilation=1)
         # self.affinity4 = AffinityFeature(dilation=4)
- 
+
         self.affinityfuse = nn.Conv2d(8*2 , outdim, kernel_size=1, stride=1, padding=0 )
     def forward(self, x ):
         x = self.affinityin(x)
         affinity1 = self.affinity1( x )
         affinity2 = self.affinity2( affinity1 )
         # affinity4 = self.affinity4( x )
-  
+
         out = self.affinityfuse( torch.cat( ( affinity1,affinity2 ), dim=1) )
         return  out
 
 
-
+# * Affinity-based Dynamic Refinement（ADR）：通过多级可变形卷积细化时序采样位置
 class multipatch_deformable(nn.Module):
     def __init__( self, indim, outdim ):
         super(multipatch_deformable, self).__init__()
@@ -118,7 +119,7 @@ class multipatch_deformable(nn.Module):
         self.deformable7 = DeformConvPack_d(8, 8, kernel_size=[ 3, 3, 3 ], stride=[ 1, 1, 1 ],padding=[ 1, 1, 1 ], dimension='HW' )
         self.deformablefuse = nn.Conv3d(8*3 , outdim, kernel_size=3, stride=1, padding=1 )
     def forward(self, x ):
-    
+        # * 逐级执行三个可变形卷积模块，再拼接并融合各级细化特征
         deformable3 = self.deformable3( x )
         deformable5 = self.deformable5( deformable3 )
         deformable7 = self.deformable7( deformable5 )
@@ -127,7 +128,7 @@ class multipatch_deformable(nn.Module):
         return  out
 
 
-
+# * Weighted Voxel Attention（WVA）所使用的线性 3D 交叉注意力
 class LinearAttention3D(nn.Module) :
     def __init__(self, dim,query_dim, outdim=1, heads=2, dim_head=1 ):
         super().__init__()
@@ -144,7 +145,7 @@ class LinearAttention3D(nn.Module) :
             lambda t: rearrange(t, "b (h c) x y z -> b h c (x y z)", h=self.heads), qkv )
 
         query = self.to_q(query)
-        q = rearrange(query, "b (h c) x y z -> b h c (x y z)", h=self.heads) 
+        q = rearrange(query, "b (h c) x y z -> b h c (x y z)", h=self.heads)
 
         q = q.softmax(dim=-2)
         k = k.softmax(dim=-1)
@@ -153,8 +154,8 @@ class LinearAttention3D(nn.Module) :
         out = torch.einsum("b h d e, b h d n -> b h e n", context, q)
         out = rearrange(out, "b h c (x y z) -> b (h c) x y z", h=self.heads, x=h, y=w)
         return self.to_out( out )
-    
-    
+
+
 class DeformConv3d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False):
         super(DeformConv3d, self).__init__()
@@ -165,22 +166,22 @@ class DeformConv3d(nn.Module):
         self.zero_padding = nn.ConstantPad3d(padding, 0)
         self.conv_kernel = nn.Conv3d(in_channels * N, out_channels, kernel_size=1, bias=bias)
         self.offset_conv_kernel = nn.Conv3d(in_channels, N * 3, kernel_size=kernel_size, padding=padding, bias=bias)
-        
+
         self.mode = "deformable"
-        
-    def deformable_mode(self, on=True): # 
+
+    def deformable_mode(self, on=True): #
         if on:
             self.mode = "deformable"
         else:
             self.mode = "regular"
-        
+
     def forward(self, x):
         if self.mode == "deformable":
             offset = self.offset_conv_kernel(x)
         else:
             b, c, h, w, d = x.size()
             offset = torch.zeros(b, 3 * self.kernel_size ** 3, h, w, d).to(x)
-        
+
         dtype = offset.data.type()
         ks = self.kernel_size
         N = offset.size(1) // 3
@@ -194,7 +195,7 @@ class DeformConv3d(nn.Module):
 
         # (b, h, w, d, 3N), N == ks ** 3, 3N - 3 coords for each point on the activation map
         p = p.contiguous().permute(0, 2, 3, 4, 1) # 5D array
-        
+
         q_sss = Variable(p.data, requires_grad=False).floor() # point with all smaller coords
 #         q_sss = p.data.floor() - same? / torch.Tensor(p.data).floor()
         q_lll = q_sss + 1 # all larger coords
@@ -226,14 +227,14 @@ class DeformConv3d(nn.Module):
         mask = mask.detach()
         floor_p = p - (p - torch.floor(p)) # все еще непонятно, что тут происходит за wtf
         p = p * (1 - mask) + floor_p * mask
-        
+
         p = torch.cat([
             torch.clamp(p[..., :N], 0, x.size(2) - 1),
             torch.clamp(p[..., N:2 * N], 0, x.size(3) - 1),
             torch.clamp(p[..., 2 * N:], 0, x.size(4) - 1),
         ], dim=-1)
-        
-        # trilinear kernel (b, h, w, d, N)  
+
+        # trilinear kernel (b, h, w, d, N)
         g_sss = (1 + (q_sss[..., :N].type_as(p) - p[..., :N])) * (1 + (q_sss[..., N:2 * N].type_as(p) - p[..., N:2 * N])) * (1 + (q_sss[..., 2 * N:].type_as(p) - p[..., 2 * N:]))
         g_lll = (1 - (q_lll[..., :N].type_as(p) - p[..., :N])) * (1 - (q_lll[..., N:2 * N].type_as(p) - p[..., N:2 * N])) * (1 - (q_lll[..., 2 * N:].type_as(p) - p[..., 2 * N:]))
         g_ssl = (1 + (q_ssl[..., :N].type_as(p) - p[..., :N])) * (1 + (q_ssl[..., N:2 * N].type_as(p) - p[..., N:2 * N])) * (1 - (q_ssl[..., 2 * N:].type_as(p) - p[..., 2 * N:]))
@@ -242,7 +243,7 @@ class DeformConv3d(nn.Module):
         g_lss = (1 - (q_lss[..., :N].type_as(p) - p[..., :N])) * (1 + (q_lss[..., N:2 * N].type_as(p) - p[..., N:2 * N])) * (1 + (q_lss[..., 2 * N:].type_as(p) - p[..., 2 * N:]))
         g_lsl = (1 - (q_lsl[..., :N].type_as(p) - p[..., :N])) * (1 + (q_lsl[..., N:2 * N].type_as(p) - p[..., N:2 * N])) * (1 - (q_lsl[..., 2 * N:].type_as(p) - p[..., 2 * N:]))
         g_lls = (1 - (q_lls[..., :N].type_as(p) - p[..., :N])) * (1 - (q_lls[..., N:2 * N].type_as(p) - p[..., N:2 * N])) * (1 + (q_lls[..., 2 * N:].type_as(p) - p[..., 2 * N:]))
-        
+
         # get values in all 8 neighbor points
         # (b, c, h, w, d, N) - 6D-array
         x_q_sss = self._get_x_q(x, q_sss, N)
@@ -253,7 +254,7 @@ class DeformConv3d(nn.Module):
         x_q_lss = self._get_x_q(x, q_lss, N)
         x_q_lsl = self._get_x_q(x, q_lsl, N)
         x_q_lls = self._get_x_q(x, q_lls, N)
-        
+
         # (b, c, h, w, d, N)
         x_offset = g_sss.unsqueeze(dim=1) * x_q_sss + \
                    g_lll.unsqueeze(dim=1) * x_q_lll + \
@@ -263,27 +264,27 @@ class DeformConv3d(nn.Module):
                    g_lss.unsqueeze(dim=1) * x_q_lss + \
                    g_lsl.unsqueeze(dim=1) * x_q_lsl + \
                    g_lls.unsqueeze(dim=1) * x_q_lls
-        
+
         x_offset = self._reshape_x_offset(x_offset, ks)
         out = self.conv_kernel(x_offset)
-        
+
         return out
-    
+
     def _get_p_n(self, N, dtype):
         p_n_x, p_n_y, p_n_z = np.meshgrid(
             range(-(self.kernel_size - 1) // 2, (self.kernel_size - 1) // 2 + 1),
             range(-(self.kernel_size - 1) // 2, (self.kernel_size - 1) // 2 + 1),
-            range(-(self.kernel_size - 1) // 2, (self.kernel_size - 1) // 2 + 1), 
+            range(-(self.kernel_size - 1) // 2, (self.kernel_size - 1) // 2 + 1),
             indexing='ij')
-        
+
         # (3N, 1) - 3 coords for each of N offsets
         # (x1, ... xN, y1, ... yN, z1, ... zN)
         p_n = np.concatenate((p_n_x.flatten(), p_n_y.flatten(), p_n_z.flatten()))
         p_n = np.reshape(p_n, (1, 3 * N, 1, 1, 1))
         p_n = torch.from_numpy(p_n).type(dtype)
-        
+
         return p_n
-    
+
     @staticmethod
     def _get_p_0(h, w, d, N, dtype):
         p_0_x, p_0_y, p_0_z = np.meshgrid(range(1, h + 1), range(1, w + 1), range(1, d + 1), indexing='ij')
@@ -294,7 +295,7 @@ class DeformConv3d(nn.Module):
         p_0 = torch.from_numpy(p_0).type(dtype)
 
         return p_0
-    
+
     def _get_p(self, offset, dtype):
         N, h, w, d = offset.size(1) // 3, offset.size(2), offset.size(3), offset.size(4)
 
@@ -303,12 +304,12 @@ class DeformConv3d(nn.Module):
         # (1, 3N, h, w, d)
         p_0 = self._get_p_0(h, w, d, N, dtype).to(offset)
         p = p_0 + p_n + offset
-        
+
         return p
-    
+
     def _get_x_q(self, x, q, N):
         b, h, w, d, _ = q.size()
-        
+
         #           (0, 1, 2, 3, 4)
         # x.size == (b, c, h, w, d)
         padded_w = x.size(3)
@@ -322,9 +323,9 @@ class DeformConv3d(nn.Module):
         index = q[..., :N] * padded_w * padded_d + q[..., N:2 * N] * padded_d + q[..., 2 * N:]
         # (b, c, h*w*d*N)
         index = index.contiguous().unsqueeze(dim=1).expand(-1, c, -1, -1, -1, -1).contiguous().view(b, c, -1)
-        
+
         x_offset = x.gather(dim=-1, index=index).contiguous().view(b, c, h, w, d, N)
-        
+
         return x_offset
 
     @staticmethod
@@ -334,7 +335,7 @@ class DeformConv3d(nn.Module):
         x_offset = x_offset.contiguous().view(b, c * N, h, w, d)
 
         return x_offset
-        
+
 def deform_conv3x3x3(in_planes, out_planes, stride=1):
     # 3x3x3 convolution with padding
     return DeformConv3d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
@@ -364,8 +365,8 @@ class DeformBasicBlock(nn.Module):
         out = self.relu(out)
 
         return out
-    
-    
+
+
 class Flatten(nn.Module):
     def forward(self, input):
         return input.view(input.size(0), -1)
@@ -374,7 +375,7 @@ class Flatten(nn.Module):
 class Identity(nn.Module):
     def __init__(self,):
         super(Identity, self).__init__()
-        
+
     def forward(self, x):
         return x
 

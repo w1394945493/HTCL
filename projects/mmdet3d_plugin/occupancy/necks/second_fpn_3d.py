@@ -58,10 +58,10 @@ class SECONDFPN3D(BaseModule):
                  use_output_upsample=False,
                  with_cp=False,
                  init_cfg=None):
-        
-        # replacing GN with BN3D, performance drops from 42.5 to 40.9. 
+
+        # replacing GN with BN3D, performance drops from 42.5 to 40.9.
         # the difference may be exaggerated because the performance can fluncate a lot
-        
+
         super(SECONDFPN3D, self).__init__(init_cfg=init_cfg)
         assert len(out_channels) == len(upsample_strides) == len(in_channels)
         self.in_channels = in_channels
@@ -90,11 +90,11 @@ class SECONDFPN3D(BaseModule):
 
             deblock = nn.Sequential(
                 upsample_layer, build_norm_layer(norm_cfg, out_channel)[1], nn.ReLU(inplace=True))
-            
+
             deblocks.append(deblock)
-        
+
         self.deblocks = nn.ModuleList(deblocks)
-        
+
         self.use_output_upsample = use_output_upsample
         if self.use_output_upsample:
             output_channel = sum(out_channels)
@@ -104,7 +104,7 @@ class SECONDFPN3D(BaseModule):
                     out_channels=output_channel, kernel_size=2, stride=2),
                 build_norm_layer(norm_cfg, output_channel)[1],
                 nn.ReLU(inplace=True),
-     
+
             )
 
         if init_cfg is None:
@@ -112,9 +112,10 @@ class SECONDFPN3D(BaseModule):
                 dict(type='Kaiming', layer='ConvTranspose2d'),
                 dict(type='Constant', layer='NaiveSyncBatchNorm2d', val=1.0)
             ]
-  
 
+        # * WVA 的可学习门控系数 α：初始化为 0，避免训练初期不可靠的时序信息干扰 Vvox
         self.alpha = nn.Parameter( torch.zeros(1) )
+        # * 3D 交叉注意力：查询来自 Vvox，键和值来自可靠时序体素 Ṽtem
         self.attention_3d = LinearAttention3D( query_dim=384, dim=384,  heads=2 )
 
 
@@ -131,16 +132,16 @@ class SECONDFPN3D(BaseModule):
         """
         assert len(x) == len(self.in_channels)
         ups = [deblock(x[i]) for i, deblock in enumerate(self.deblocks)]
-        
+
         if len(ups) > 1:
-            out = torch.cat(ups, dim=1) 
+            out = torch.cat(ups, dim=1)
         else:
             out = ups[0]
-        
+
         if self.use_output_upsample:
             out = torch.utils.checkpoint.checkpoint(self.output_deblock, out)
 
-        out = self.alpha * self.attention_3d( query = out,  x = temporal_voxel[0] ) + out
+        out = self.alpha * self.attention_3d( query = out,  x = temporal_voxel[0] ) + out  # * Vret = α·CrossAtt(Vvox, Ṽtem) + Vvox
 
-        
-        return [out] 
+
+        return [out]
