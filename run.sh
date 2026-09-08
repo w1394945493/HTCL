@@ -12,6 +12,11 @@ pip install --no-deps "monai==0.9.1" \
 cd /vepfs-mlp2/c20250502/haoce/wangyushen/HTCL/projects/mmdet3d_plugin/occupancy/image2bev/dcn
 python setup.py build_ext --inplace
 
+# 制备PoseNet部分权重
+python scripts/extract_posenet_weights.py \
+    /c20250502/wangyushen/Weights/htcl/pretrain.pth \
+    /c20250502/wangyushen/Weights/htcl/posenet.pth
+  
 # PYTHONPATH="$(pwd)"：会直接覆盖原来的 PYTHONPATH，最终只包含当前目录。
 # PYTHONPATH="$(pwd):${PYTHONPATH}"：是在原有路径前面添加当前目录
 # * semkitti训练
