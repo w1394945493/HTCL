@@ -90,6 +90,8 @@ model = dict(
         data_config=data_config,
         numC_Trans=numC_Trans,
         vp_megvii=False,
+        # * 加载从完整 HTCL checkpoint 中单独提取的 PoseNet 权重
+        pose_pretrained="/c20250502/wangyushen/Weights/htcl/posenet.pth",
     ),
     img_bev_encoder_backbone=dict(
         type="CustomResNet3D",

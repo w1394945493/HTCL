@@ -101,6 +101,7 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
             point_xyz_mode='cat',
             depth_model="lea",
             temporal_num = 4,
+            pose_pretrained=None,
             **kwargs,
         ):
 
@@ -114,7 +115,12 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
         self.warped_patch = multi_patch3d(in_channel=3, depth=1)
         self.cossim = nn.CosineSimilarity(dim=1, eps=1e-6)
 
-        self.temporal_encoder = temporal_encoder( maxdisp=112, height=384, width=1280 )
+        self.temporal_encoder = temporal_encoder(
+            maxdisp=112,
+            height=384,
+            width=1280,
+            pose_pretrained=pose_pretrained,
+        )
         self.temporal_prehourglass = nn.Sequential(convbn_3d( temporal_num-1, 32, 3, 1, 1),  nn.ReLU(inplace=True),
                                                 hourglass(32),
                                                 convbn_3d(32, 64, 3, 1, 1),

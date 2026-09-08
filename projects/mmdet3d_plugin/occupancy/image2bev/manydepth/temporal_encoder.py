@@ -18,7 +18,7 @@ from .networks import ResnetEncoder,PoseDecoder,ResnetEncoderMatching,transforma
 # *=======================================================#
 # * Aligned Temporal Volume Construction：基于位姿估计与单应性变换构建对齐时序体
 class temporal_encoder(torch.nn.Module):
-    def __init__(self, maxdisp, width, height  ):
+    def __init__(self, maxdisp, width, height, pose_pretrained=None):
         super(temporal_encoder, self).__init__()
         self.maxdisp = maxdisp # 112
         # * ==============================================#
@@ -33,10 +33,34 @@ class temporal_encoder(torch.nn.Module):
                                                 max_depth_bin=maxdisp,
                                                 adaptive_bins=False,
                                                 num_depth_bins=maxdisp )
+        # * 单独加载预训练 PoseNet；文件中的参数键应为 pose_enc.* 和 pose_dec.*
+        if pose_pretrained is not None:
+            self.load_pose_pretrained(pose_pretrained)
+
         # * 冻结 PoseNet 参数；训练时仅将其用于推断帧间相对位姿
         for name, p in self.named_parameters():
             if name.startswith("pose"):
                 p.requires_grad = False
+
+    def load_pose_pretrained(self, checkpoint_path):
+        """加载由 scripts/extract_posenet_weights.py 提取的 PoseNet 权重。"""
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        pose_state_dict = {
+            key.removeprefix("module."): value
+            for key, value in state_dict.items()
+        }
+        incompatible = self.load_state_dict(pose_state_dict, strict=False)
+        missing_pose_keys = [
+            key for key in incompatible.missing_keys
+            if key.startswith(("pose_enc.", "pose_dec."))
+        ]
+        if missing_pose_keys or incompatible.unexpected_keys:
+            raise RuntimeError(
+                "PoseNet 权重不完整或参数名称不匹配："
+                f"missing={missing_pose_keys}, unexpected={incompatible.unexpected_keys}"
+            )
+        print(f"Loaded PoseNet checkpoint from {checkpoint_path}")
 
     def load_and_preprocess_image(self, image ):
 
