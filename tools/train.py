@@ -3,7 +3,7 @@
 # ---------------------------------------------
 #  Modified by Zhiqi Li
 # ---------------------------------------------
- 
+
 from __future__ import division
 import os
 
@@ -37,10 +37,11 @@ sys.path.append('.')
 # torch.autograd.set_detect_anomaly(True)
 
 def parse_args():
+    # * 解析训练配置、结果保存目录、权重加载方式以及单卡/分布式训练参数
     parser = argparse.ArgumentParser(description='Train a detector')
     parser.add_argument('config', default=None, help='train config file path')
     parser.add_argument('--work-dir', default="work_dirs/baseline_0630_temporal", help='the dir to save logs and models')
-    parser.add_argument('--loadcheckpoint', default=None, 
+    parser.add_argument('--loadcheckpoint', default=None,
         help="the dir to load models" )
     parser.add_argument(
         '--resume-from', help='the checkpoint file to resume from')
@@ -108,9 +109,11 @@ def parse_args():
 
 
 def main():
+    # * 读取命令行参数，并加载 Python 配置文件
     args = parse_args()
 
     cfg = Config.fromfile(args.config)
+    # * 使用 --cfg-options 指定的键值覆盖配置文件中的对应设置
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
     # import modules from string list.
@@ -118,7 +121,7 @@ def main():
         from mmcv.utils import import_modules_from_strings
         import_modules_from_strings(**cfg['custom_imports'])
 
-    # import modules from plguin/xx, registry will be updated
+    # * 导入项目插件，使自定义数据集、模型和训练接口注册到 MMDetection 注册器
     if hasattr(cfg, 'plugin'):
         if cfg.plugin:
             import importlib
@@ -143,12 +146,12 @@ def main():
                 plg_lib = importlib.import_module(_module_path)
 
             from projects.mmdet3d_plugin.occupancy.apis.train import custom_train_model
-    
+
     # set cudnn_benchmark
     if cfg.get('cudnn_benchmark', False):
         torch.backends.cudnn.benchmark = True
 
-    # work_dir is determined in this priority: CLI > segment in file > filename
+    # * 设置日志与 checkpoint 的根目录，优先级为：命令行 --work-dir > 配置文件 > 默认目录
     if args.work_dir is not None:
         # update configs according to CLI args if args.work_dir is not None
         cfg.work_dir = args.work_dir
@@ -156,9 +159,10 @@ def main():
         # use config filename as default work_dir if cfg.work_dir is None
         cfg.work_dir = osp.join('./work_dirs',
                                 osp.splitext(osp.basename(args.config))[0])
-    # if args.resume_from is not None:
+    # * 设置断点续训文件；后续 runner.resume() 将恢复模型、优化器、epoch 和 iteration
     if args.resume_from is not None and osp.isfile(args.resume_from):
         cfg.resume_from = args.resume_from
+    # * 设置当前进程使用的 GPU 编号；分布式模式下稍后会按 world_size 重新设置
     if args.gpu_ids is not None:
         cfg.gpu_ids = args.gpu_ids
     else:
@@ -168,8 +172,8 @@ def main():
     if args.autoscale_lr:
         # apply the linear scaling rule (https://arxiv.org/abs/1706.02677)
         cfg.optimizer['lr'] = cfg.optimizer['lr'] * len(cfg.gpu_ids) / 8
-
-    # init distributed env first, since logger depends on the dist info.
+    # *============================================================== #
+    # * 初始化分布式训练环境；必须在创建 logger 前完成 rank 和 world_size 配置
     if args.launcher == 'none':
         distributed = False
     else:
@@ -178,14 +182,14 @@ def main():
         # re-set gpu_ids with distributed training mode
         _, world_size = get_dist_info()
         cfg.gpu_ids = range(world_size)
-
-    # create work_dir
+    # *============================================================== #
+    # * 创建结果保存目录，用于存放配置副本、训练日志和模型 checkpoint
     mmcv.mkdir_or_exist(osp.abspath(cfg.work_dir))
-    # dump config
+    # * 将合并后的完整配置保存到 work_dir，便于复现实验和记录 checkpoint 元信息
     cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config)))
-    # init the logger before other steps
+    # * 根据启动时间生成日志文件名，格式为 YYYYMMDD_HHMMSS.log
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
-    log_file = osp.join(cfg.work_dir, f'{timestamp}.log')
+    log_file = osp.join(cfg.work_dir, f'{timestamp}.log') # * 普通文本日志
     # specify logger name, if we still use 'mmdet', the output info will be
     # filtered and won't be saved in the log_file
     # TODO: ugly workaround to judge whether we are training det or seg model
@@ -193,11 +197,11 @@ def main():
         logger_name = 'mmseg'
     else:
         logger_name = 'mmdet'
+    # * 创建根日志器，将环境、配置、训练损失及验证指标写入上述日志文件
     logger = get_root_logger(
         log_file=log_file, log_level=cfg.log_level, name=logger_name)
 
-    # init the meta dict to record some important information such as
-    # environment info and seed, which will be logged
+    # * 创建实验元信息，记录运行环境、完整配置、随机种子和实验名称
     meta = dict()
     # log env info
     env_info_dict = collect_env()
@@ -212,7 +216,8 @@ def main():
     logger.info(f'Distributed training: {distributed}')
     logger.info(f'Config:\n{cfg.pretty_text}')
 
-    # set random seeds
+    # *============================================================== #
+    # * 设置随机种子；--deterministic 可进一步启用 CUDNN 确定性行为
     if args.seed is not None:
         logger.info(f'Set random seed to {args.seed}, '
                     f'deterministic: {args.deterministic}')
@@ -221,12 +226,16 @@ def main():
     meta['seed'] = args.seed
     meta['exp_name'] = osp.basename(args.config)
 
+    # *============================================================== #
+    # * 根据配置构建模型，并执行各模块的权重初始化或预训练权重加载
     model = build_model(
         cfg.model,
         train_cfg=cfg.get('train_cfg'),
         test_cfg=cfg.get('test_cfg'))
     model.init_weights()
 
+    # *============================================================== #
+    # * --loadcheckpoint 仅加载模型权重，用于预训练初始化；它不同于完整断点续训
     if args.loadcheckpoint is not None:
         checkpoint = load_checkpoint(model, args.loadcheckpoint, map_location='cpu')
         if 'CLASSES' in checkpoint.get('meta', {}):
@@ -239,6 +248,7 @@ def main():
 
 
     logger.info(f'Model:\n{model}')
+    # * 根据 cfg.data.train 构建训练数据集
     datasets = [build_dataset(cfg.data.train)]
     if len(cfg.workflow) == 2:
         val_dataset = copy.deepcopy(cfg.data.val)
@@ -252,6 +262,8 @@ def main():
         # refer to https://mmdetection3d.readthedocs.io/en/latest/tutorials/customize_runtime.html#customize-workflow  # noqa
         val_dataset.test_mode = False
         datasets.append(build_dataset(val_dataset))
+    # *============================================================== #
+    # * 设置 checkpoint 元信息，使保存的 epoch_x.pth 包含版本、配置和类别信息
     if cfg.checkpoint_config is not None:
         # save mmdet version, config file content and class names in
         # checkpoints as meta data
@@ -265,6 +277,8 @@ def main():
             if hasattr(datasets[0], 'PALETTE') else None)
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
+    # *============================================================== #
+    # * 进入自定义训练流程：创建 dataloader、optimizer、runner 和各类 hook 后开始训练
     custom_train_model(
         model,
         datasets,

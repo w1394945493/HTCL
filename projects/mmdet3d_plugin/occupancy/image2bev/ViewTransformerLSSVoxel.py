@@ -371,7 +371,7 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
             self.forward_dic['imgseg_logits'] = self.img_seg_head(x)
         # *---------------------------------------------#
         # * 1.2 单目深度估计：延续CGFormer工作，单目深度估计分支和上下文分支
-        x = self.depth_net(x, mlp_input) 
+        x = self.depth_net(x, mlp_input)
         depth_digit = x[:, :self.D, ...] # (1 112 48 160)
         img_feat = x[:, self.D:self.D + self.numC_Trans, ...] # (1 128 48 160) # * 每个像素的上下文特征
         depth_prob = self.get_depth_dist(depth_digit) # (1 112 48 160) # * 每个像素的离散深度分布
@@ -392,12 +392,15 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
         bev_feat = self.voxel_pooling(geom, volume) # (1 128 128 128 16)
 
         # *=============================================#
-        # * 2. 对齐时序体构建 Aligned Temporal Volume Construction ：将历史帧特征对齐到当前参考帧
+        # * 2. 时序上下文对齐
+        # * 2.1 对齐时序体构建 Aligned Temporal Volume Construction ：将历史帧特征对齐到当前参考帧
+        # * (1) 将当前帧和历史帧输入轻量级 PoseNet，以估计用于光度重投影的相对相机位姿；
+        # * (2) 生成当前帧特征图以及历史帧特征图集合：
+        # * (3) 利用相对相机位姿和一组候选深度假设平面，通过单应性变换构建经过变换的历史帧特征
         img_left_ref, img_left_sour = left_input[:, -1, ...].unsqueeze(1).permute(0,1,4,2,3).cuda(), left_input[:,:-1, ...].permute(0,1,4,2,3).cuda()  # (1 1 3 384 1280) (1 3 3 384 1280)
         curr_feature, batch_waped_feature = self.temporal_encoder( ref_images=img_left_ref, source_images=img_left_sour, intrinsics=intrins ) # (1 64 96 320) (1 3 112 96 320)
-        
-        # *=============================================#
-        # * 3. 
+
+
         curr_feature = F.interpolate(curr_feature, size=[H, W], mode='bilinear', align_corners=True) # (1 64 96 320)->(1 64 48 160)
         batch_waped_feature = F.interpolate(batch_waped_feature, size=[self.D, H, W], mode='trilinear', align_corners=True) # (1 3 112 48 160)
         # * ADR：使用多级可变形卷积动态细化历史特征的采样位置
@@ -406,8 +409,8 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
         curr_feature = self.curr_patch(curr_feature)
         batch_waped_feature = self.warped_patch(batch_waped_feature)
 
-        # * 计算当前 pattern 与历史 pattern 的余弦相似度，得到跨帧亲和度
-        temporal_volume = self.cossim(  (curr_feature-curr_feature.mean(1).unsqueeze(1)).unsqueeze(2).repeat(1,1,self.D,1,1), (batch_waped_feature-batch_waped_feature.mean(1).unsqueeze(1)) ).unsqueeze(1)
+        # * 将当前特征沿深度维度复制，
+        temporal_volume = self.cossim((curr_feature-curr_feature.mean(1).unsqueeze(1)).unsqueeze(2).repeat(1,1,self.D,1,1), (batch_waped_feature-batch_waped_feature.mean(1).unsqueeze(1))).unsqueeze(1)
         temporal_volume = (temporal_volume) * defomable_batch_waped_feature # * 使用 CPA 亲和度对 ADR 细化后的历史特征进行加权
         # * 对 CPA 加权后的可靠时序内容进行 3D Hourglass 编码
         temporal_volume = self.temporal_prehourglass(temporal_volume)

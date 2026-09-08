@@ -90,6 +90,7 @@ class temporal_encoder(torch.nn.Module):
 
             # *===========================================#
             # * 使用 PoseNet 根据当前图像与历史图像估计相对位姿；相机内参用于后续几何 warp
+            # * (1) 将当前帧和历史帧输入轻量级 PoseNet，以估计用于光度重投影的相对相机位姿；
             with torch.no_grad():  # 位姿网络仅用于推理，不构建计算图，也不更新 PoseNet 参数
                 pose_inputs = [source_image, input_image]  # 按“历史帧、当前帧”的顺序组成待估计位姿的图像对
                 pose_inputs = torch.cat(pose_inputs, 1)  # 沿通道维拼接两帧图像：(B, 3, H, W)×2 → (B, 6, H, W)
@@ -105,11 +106,13 @@ class temporal_encoder(torch.nn.Module):
             # *===========================================#
             # * Homography warping / feature matching：基于相对位姿和相机内参，将历史特征对齐到当前帧
             # * 使用ManyDepth风格的resnet18，在1/4尺度的二维图像特征图上，利用相机几何约束进行跨帧特征匹配
+            # * (2) 生成当前帧特征图以及历史帧特征图集合：
+            # * (3) 利用相对相机位姿和一组候选深度假设平面，通过单应性变换构建经过变换的历史帧特征
             curr_feature, batch_waped_feature  = self.encoder(current_image=input_image, # (1 3 384 1280) # * 当前图像
                                             lookup_images=source_image.unsqueeze(1),     # (1 1 3 384 1280) # * 历史图像
                                             poses=pose.unsqueeze(1),                     # (1 1 4 4) * 相对位姿
                                             K=K,                                         # (1 4 4) * 相机内参
                                             invK=invK)                                   # (1 4 4) * 逆内参
-            combined_waped_feature[:, temporal,:,:,:] = batch_waped_feature.squeeze(1)
+            combined_waped_feature[:, temporal,:,:,:] = batch_waped_feature.squeeze(1) # (1 3 112 96 320)
 
         return  curr_feature, combined_waped_feature # (1 64 96 320) (1 3 112 96 320)

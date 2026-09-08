@@ -115,6 +115,7 @@ class ResnetEncoderMatching(nn.Module):
             _K = K[batch_idx:batch_idx + 1]  # 当前样本在特征图尺度下的相机内参：(1, 4, 4)
             _invK = invK[batch_idx:batch_idx + 1]  # 当前样本的逆内参，用于像素反投影：(1, 4, 4)
 
+            # * 反投影, 对应论文公式(3)
             # 将当前视角的像素按 D 个深度假设反投影为齐次三维点
             world_points = self.backprojector(self.warp_depths, _invK) # (112 4 30720)
 
@@ -137,7 +138,7 @@ class ResnetEncoderMatching(nn.Module):
                     align_corners=True,
                 ) # (112 64 96 320) # 得到 D 个深度假设下的历史帧对齐特征：(D, C, h, w)
                 waped_feature.append(warped)  # 保存当前历史帧的对齐特征
-            
+
             # 将所有有效历史帧的对齐结果堆叠到时间维
             waped_feature = torch.stack(waped_feature, dim=0) # (1 112 64 96 320) # 形状为 (T, D, C, h, w)；当前调用中 T=1
             batch_waped_feature.append(waped_feature)  # 保存当前 batch 样本的对齐结果
@@ -180,7 +181,7 @@ class ResnetEncoderMatching(nn.Module):
 
     def forward(self, current_image, lookup_images, poses, K, invK,
                 min_depth_bin=0, max_depth_bin=112):  # 提取当前帧和历史帧特征，并构建对齐时序特征体
-
+        # * (2) 生成当前帧特征图以及历史帧特征图集合：current_features 和 lookup_feats
         # * 提取当前帧特征
         # 使用共享的 ResNet 编码器提取当前帧多尺度特征
         # self.features = self.feature_extraction(current_image, return_all_feats=True)  # 返回所有尺度的特征，供当前分支及后续网络使用
@@ -210,6 +211,7 @@ class ResnetEncoderMatching(nn.Module):
 
         # *==============================================================#
         # * 基于相对位姿、相机内参和多深度假设，将历史特征反向采样到当前帧视角
+        # * (3) 利用相对相机位姿和一组候选深度假设平面，通过单应性变换构建经过变换的历史帧特征
         batch_waped_feature = self.match_features(  # 对历史特征执行几何 warp，构建对齐后的时序特征体
             current_feats,  # (1 64 96 320) # 当前帧特征，用于确定 batch 和目标视角
             lookup_feats, # (1 1 64 96 320) # 尚未对齐的历史帧特征
