@@ -41,7 +41,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
     parser.add_argument('config', default=None, help='train config file path')
     parser.add_argument('--work-dir', default="work_dirs/baseline_0630_temporal", help='the dir to save logs and models')
-    parser.add_argument('--load-checkpoint', default=None,
+    parser.add_argument('--loadcheckpoint', default=None,
         help="the dir to load models" )
     parser.add_argument(
         '--resume-from', help='the checkpoint file to resume from')
