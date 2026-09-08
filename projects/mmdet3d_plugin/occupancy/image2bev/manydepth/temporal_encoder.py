@@ -1,18 +1,19 @@
-import os
-import json
-import argparse
-import numpy as np
-import PIL.Image as pil
-import matplotlib as mpl
-import matplotlib.cm as cm
-from collections import OrderedDict
+# import os
+# import json
+# import argparse
+# import numpy as np
+# import PIL.Image as pil
+# import matplotlib as mpl
+# import matplotlib.cm as cm
+# from collections import OrderedDict
 
 import torch
-from torchvision import transforms
+# from torchvision import transforms
 import sys
 # sys.path.append("projects/mmdet3d_plugin/occupancy/image2bev/manydepth/")
-import networks
+# import networks
 from torch.autograd import Variable
+from .networks import ResnetEncoder,PoseDecoder,ResnetEncoderMatching,transformation_from_parameters
 
 # *=======================================================#
 # * Aligned Temporal Volume Construction：基于位姿估计与单应性变换构建对齐时序体
@@ -22,13 +23,15 @@ class temporal_encoder(torch.nn.Module):
         self.maxdisp = maxdisp # 112
         # * ==============================================#
         # * 定义轻量级 PoseNet 和基于深度假设平面的时序匹配编码器
-        self.pose_enc = networks.ResnetEncoder(18, False, num_input_images=2)
-        self.pose_dec = networks.PoseDecoder(self.pose_enc.num_ch_enc, num_input_features=1,
+        self.pose_enc = ResnetEncoder(18, False, num_input_images=2)
+        self.pose_dec = PoseDecoder(self.pose_enc.num_ch_enc, num_input_features=1,
                                         num_frames_to_predict_for=2)
-        self.encoder = networks.ResnetEncoderMatching(18, False,
+        self.encoder = ResnetEncoderMatching(18, False,
                                                 input_width = width,
                                                 input_height = height,
-                                                adaptive_bins=True,
+                                                min_depth_bin=0,
+                                                max_depth_bin=maxdisp,
+                                                adaptive_bins=False,
                                                 num_depth_bins=maxdisp )
         # * 冻结 PoseNet 参数；训练时仅将其用于推断帧间相对位姿
         for name, p in self.named_parameters():
@@ -84,18 +87,24 @@ class temporal_encoder(torch.nn.Module):
             source_image = source_images[:, temporal, ...] # (1 3 384 1280)
             input_image, original_size = self.load_and_preprocess_image(ref_image )
             source_image, _ = self.load_and_preprocess_image(source_image )
+
             # *===========================================#
             # * 使用 PoseNet 根据当前图像与历史图像估计相对位姿；相机内参用于后续几何 warp
-            with torch.no_grad():
-                # Estimate poses
-                pose_inputs = [source_image, input_image]
-                pose_inputs = self.pose_enc(torch.cat(pose_inputs, 1))
-                pose_inputs = [ pose_inputs ]
-                axisangle, translation = self.pose_dec(pose_inputs) # (1 2 1 3) (1 2 1 3) # * 输出相对旋转的轴角表示与相对平移 
-                pose = networks.transformation_from_parameters(axisangle[:, 0], translation[:, 0], invert=True) # (1 4 47)
-            
+            with torch.no_grad():  # 位姿网络仅用于推理，不构建计算图，也不更新 PoseNet 参数
+                pose_inputs = [source_image, input_image]  # 按“历史帧、当前帧”的顺序组成待估计位姿的图像对
+                pose_inputs = torch.cat(pose_inputs, 1)  # 沿通道维拼接两帧图像：(B, 3, H, W)×2 → (B, 6, H, W)
+                pose_inputs = self.pose_enc(pose_inputs)  # 使用 PoseNet 编码器提取图像对的多尺度位姿特征
+                pose_inputs = [pose_inputs]  # 按 PoseDecoder 要求，将编码器的多尺度特征包装为输入列表
+                axisangle, translation = self.pose_dec(pose_inputs)  # 解码相对旋转轴角和平移，形状均为 (B, 2, 1, 3)
+                pose = transformation_from_parameters(  # 将轴角和平移转换为齐次相对变换矩阵 (B, 4, 4)
+                    axisangle[:, 0],  # 选择第一个待预测帧对应的旋转参数，形状为 (B, 1, 3)
+                    translation[:, 0],  # 选择第一个待预测帧对应的平移参数，形状为 (B, 1, 3)
+                    invert=True,  # 对变换求逆，使矩阵方向满足后续历史帧特征对齐所需的坐标变换方向
+                )
+
             # *===========================================#
             # * Homography warping / feature matching：基于相对位姿和相机内参，将历史特征对齐到当前帧
+            # * 使用ManyDepth风格的resnet18，在1/4尺度的二维图像特征图上，利用相机几何约束进行跨帧特征匹配
             curr_feature, batch_waped_feature  = self.encoder(current_image=input_image, # * 当前图像
                                             lookup_images=source_image.unsqueeze(1),     # * 历史图像
                                             poses=pose.unsqueeze(1),                     # * 相对位姿

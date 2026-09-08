@@ -1,13 +1,13 @@
 
-import os
+# import os
 import numpy as np
-from einops import rearrange
+# from einops import rearrange
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 import torch.utils.model_zoo as model_zoo
-from typing import Type, Any, Callable, Union, List, Optional
+# from typing import Type, Any, Callable, Union, List, Optional
 from .temporal_retrieve  import *
 
 
@@ -38,8 +38,6 @@ class ResnetEncoderMatching(nn.Module):
         self.matching_height, self.matching_width = input_height // 4, input_width // 4
 
         self.is_cuda = False
-        self.warp_depths = None
-        self.depth_bins = None
 
         resnets = {18: models.resnet18}
 
@@ -49,7 +47,7 @@ class ResnetEncoderMatching(nn.Module):
         encoder = resnets[num_layers](pretrained)
         self.layer0 = nn.Sequential(encoder.conv1,  encoder.bn1, encoder.relu)
         self.layer1 = nn.Sequential(encoder.maxpool,  encoder.layer1)
-     
+
 
 
         self.backprojector = BackprojectDepth(batch_size=self.num_depth_bins,
@@ -59,31 +57,57 @@ class ResnetEncoderMatching(nn.Module):
                                    height=self.matching_height,
                                    width=self.matching_width)
 
-    
-
-    def compute_depth_bins(self, min_depth_bin, max_depth_bin):
-        """Compute the depths bins used to build the cost volume. Bins will depend upon
-        self.depth_binning, to either be linear in depth (linear) or linear in inverse depth
-        (inverse)"""
-
-        if self.depth_binning == 'inverse':
-            self.depth_bins = 1 / np.linspace(1 / max_depth_bin,
-                                              1 / min_depth_bin,
-                                              self.num_depth_bins)[::-1]  # maintain depth order
-
-        elif self.depth_binning == 'linear':
-            self.depth_bins = np.linspace(min_depth_bin, max_depth_bin, self.num_depth_bins)
+        # *====================================================#
+        #* 新增代码
+        # HTCL 使用固定深度范围，因此在初始化时生成一次深度假设，避免每次 forward 重复计算
+        if self.depth_binning == 'linear':  # 在深度空间中均匀采样
+            depth_bins = torch.linspace(
+                min_depth_bin, max_depth_bin, steps=self.num_depth_bins,
+                dtype=torch.float32)
+        elif self.depth_binning == 'inverse':  # 在逆深度空间中均匀采样，并保持深度由近到远排列
+            if min_depth_bin <= 0:
+                raise ValueError("inverse depth binning requires min_depth_bin > 0")
+            depth_bins = torch.reciprocal(torch.linspace(
+                1.0 / min_depth_bin, 1.0 / max_depth_bin,
+                steps=self.num_depth_bins, dtype=torch.float32))
         else:
-            raise NotImplementedError
-        self.depth_bins = torch.from_numpy(self.depth_bins).float()
+            raise NotImplementedError(
+                "Unsupported depth binning mode: {}".format(self.depth_binning))
 
-        self.warp_depths = []
-        for depth in self.depth_bins:
-            depth = torch.ones((1, self.matching_height, self.matching_width)) * depth
-            self.warp_depths.append(depth)
-        self.warp_depths = torch.stack(self.warp_depths, 0).float()
-        if self.is_cuda:
-            self.warp_depths = self.warp_depths.cuda()
+        # buffer 不参与梯度更新，并会随模型自动迁移设备；persistent=False 避免增加 checkpoint 体积
+        self.register_buffer("depth_bins", depth_bins, persistent=False)
+        self.register_buffer(
+            "warp_depths",
+            depth_bins[:, None, None, None].expand(
+                -1, 1, self.matching_height, self.matching_width),
+            persistent=False,
+        )
+
+
+    #! 注释的原代码
+    # def compute_depth_bins(self, min_depth_bin, max_depth_bin):
+    #     """Compute the depths bins used to build the cost volume. Bins will depend upon
+    #     self.depth_binning, to either be linear in depth (linear) or linear in inverse depth
+    #     (inverse)"""
+
+    #     if self.depth_binning == 'inverse':
+    #         self.depth_bins = 1 / np.linspace(1 / max_depth_bin,
+    #                                           1 / min_depth_bin,
+    #                                           self.num_depth_bins)[::-1]  # maintain depth order
+
+    #     elif self.depth_binning == 'linear':
+    #         self.depth_bins = np.linspace(min_depth_bin, max_depth_bin, self.num_depth_bins)
+    #     else:
+    #         raise NotImplementedError
+    #     self.depth_bins = torch.from_numpy(self.depth_bins).float()
+
+    #     self.warp_depths = []
+    #     for depth in self.depth_bins:
+    #         depth = torch.ones((1, self.matching_height, self.matching_width)) * depth
+    #         self.warp_depths.append(depth)
+    #     self.warp_depths = torch.stack(self.warp_depths, 0).float()
+    #     if self.is_cuda:
+    #         self.warp_depths = self.warp_depths.cuda()
 
     def match_features(self, current_feats, lookup_feats, relative_poses, K, invK):
         """Compute a cost volume based on L1 difference between current_feats and lookup_feats.
@@ -97,16 +121,16 @@ class ResnetEncoderMatching(nn.Module):
 
 
         batch_waped_feature = []
-        
+
         # with torch.no_grad():
         for batch_idx in range(len(current_feats)):
 
             _lookup_feats = lookup_feats[batch_idx:batch_idx + 1]
             _lookup_poses = relative_poses[batch_idx:batch_idx + 1]
-            
+
             _K = K[batch_idx:batch_idx + 1]
             _invK = invK[batch_idx:batch_idx + 1]
- 
+
             world_points = self.backprojector(self.warp_depths, _invK)
 
 
@@ -120,7 +144,7 @@ class ResnetEncoderMatching(nn.Module):
                 if lookup_pose.sum() == 0:
                     continue
 
-                lookup_feat = lookup_feat.repeat([self.num_depth_bins, 1, 1, 1])  
+                lookup_feat = lookup_feat.repeat([self.num_depth_bins, 1, 1, 1])
                 pix_locs = self.projector(world_points, _K, lookup_pose)
                 warped = F.grid_sample(lookup_feat, pix_locs, padding_mode='zeros', mode='bilinear',
                                     align_corners=True)  #
@@ -131,14 +155,14 @@ class ResnetEncoderMatching(nn.Module):
             waped_feature= torch.stack(waped_feature, 0)
             batch_waped_feature.append(waped_feature)
 
-        
 
 
-        batch_waped_feature = torch.stack(batch_waped_feature, 0)  
+
+        batch_waped_feature = torch.stack(batch_waped_feature, 0)
 
         batch_waped_feature = batch_waped_feature.squeeze(1).permute(0,2,1,3,4)
         batch_waped_feature = batch_waped_feature.mean(1)
-   
+
 
         return batch_waped_feature
 
@@ -171,53 +195,70 @@ class ResnetEncoderMatching(nn.Module):
 
         return confidence_mask
 
-    def forward(self, current_image, lookup_images, poses, K, invK, min_depth_bin=0, max_depth_bin=112 ):
+    def forward(self, current_image, lookup_images, poses, K, invK,
+                min_depth_bin=0, max_depth_bin=112):  # 提取当前帧和历史帧特征，并构建对齐时序特征体
 
-        # feature extraction
-        self.features = self.feature_extraction(current_image, return_all_feats=True)
-        current_feats = self.features[-1]  
+        # * 提取当前帧特征
+        # 使用共享的 ResNet 编码器提取当前帧多尺度特征
+        self.features = self.feature_extraction(current_image, return_all_feats=True)  # 返回所有尺度的特征，供当前分支及后续网络使用
+        current_feats = self.features[-1]  # 取最后一级特征作为帧间几何匹配的当前帧特征
 
-        # feature extraction on lookup images - disable gradients to save memory
-        with torch.no_grad():
-            if self.adaptive_bins:
-                self.compute_depth_bins(min_depth_bin, max_depth_bin)
-            batch_size, num_frames, chns, height, width = lookup_images.shape
-            lookup_images = lookup_images.reshape(batch_size * num_frames, chns, height, width)
-        lookup_feats = self.feature_extraction(lookup_images,
-                                                return_all_feats=False)
-        _, chns, height, width = lookup_feats.shape
-        lookup_feats = lookup_feats.reshape(batch_size, num_frames, chns, height, width)
- 
-        # warp features to find cost volume
-        batch_waped_feature  = \
-            self.match_features(current_feats, lookup_feats, poses, K, invK) 
+        # * 整理历史帧输入并生成用于几何匹配的深度假设平面
+        #! 注释的原代码
+        # with torch.no_grad():  # 本代码块仅包含深度分箱和形状变换，不构建对应的计算图
+        #     if self.adaptive_bins:  # 启用自适应深度分箱时，为本次前向传播重新生成深度采样值
+        #         # * 生成固定深度假设，不是需要学习的网络输出
+        #         self.compute_depth_bins(min_depth_bin, max_depth_bin) # 在指定深度范围内生成 num_depth_bins 个深度假设平面
+        #     batch_size, num_frames, chns, height, width = lookup_images.shape  # 解析历史图像形状：(B, T, C, H, W)
+        #     # 合并 batch 维和时间维，以便一次送入二维图像编码器
+        #     lookup_images = lookup_images.reshape(batch_size * num_frames, chns, height, width)  # (B, T, C, H, W) → (B×T, C, H, W)
 
+        #* 新增代码
+        batch_size, num_frames, chns, height, width = lookup_images.shape  # 解析历史图像形状：(B, T, C, H, W)
+        # 合并 batch 维和时间维，以便批量提取历史帧特征
+        lookup_images = lookup_images.reshape(batch_size * num_frames, chns, height, width)  # (B, T, C, H, W) → (B×T, C, H, W)
 
-        return  current_feats, batch_waped_feature
+        # 使用与当前帧共享的编码器提取所有历史帧特征
+        lookup_feats = self.feature_extraction(lookup_images, return_all_feats=False)  # 只返回几何匹配所需的最后一级特征
+        _, chns, height, width = lookup_feats.shape  # 读取历史特征的通道数和空间尺寸
+        # 恢复历史帧的 batch 维和时间维
+        lookup_feats = lookup_feats.reshape(batch_size, num_frames, chns, height, width)  # (B×T, C, h, w) → (B, T, C, h, w)
 
-    def cuda(self):
-        super().cuda()
-        self.backprojector.cuda()
-        self.projector.cuda()
-        self.is_cuda = True
-        if self.warp_depths is not None:
-            self.warp_depths = self.warp_depths.cuda()
+        # *==============================================================#
+        # * 基于相对位姿、相机内参和多深度假设，将历史特征反向采样到当前帧视角
+        batch_waped_feature = self.match_features(  # 对历史特征执行几何 warp，构建对齐后的时序特征体
+            current_feats,  # 当前帧特征，用于确定 batch 和目标视角
+            lookup_feats,  # 尚未对齐的历史帧特征
+            poses,  # 当前帧与各历史帧之间的相对位姿
+            K,  # 特征图尺度下的相机内参矩阵
+            invK,  # 相机内参伪逆，用于将二维像素反投影到三维空间
+        )
 
-    def cpu(self):
-        super().cpu()
-        self.backprojector.cpu()
-        self.projector.cpu()
-        self.is_cuda = False
-        if self.warp_depths is not None:
-            self.warp_depths = self.warp_depths.cpu()
+        return current_feats, batch_waped_feature  # 返回当前帧特征及对齐后的历史时序特征体
 
-    def to(self, device):
-        if str(device) == 'cpu':
-            self.cpu()
-        elif str(device) == 'cuda':
-            self.cuda()
-        else:
-            raise NotImplementedError
+    # def cuda(self):
+    #     super().cuda()
+    #     self.backprojector.cuda()
+    #     self.projector.cuda()
+    #     self.is_cuda = True
+    #     if self.warp_depths is not None:
+    #         self.warp_depths = self.warp_depths.cuda()
+
+    # def cpu(self):
+    #     super().cpu()
+    #     self.backprojector.cpu()
+    #     self.projector.cpu()
+    #     self.is_cuda = False
+    #     if self.warp_depths is not None:
+    #         self.warp_depths = self.warp_depths.cpu()
+
+    # def to(self, device):
+    #     if str(device) == 'cpu':
+    #         self.cpu()
+    #     elif str(device) == 'cuda':
+    #         self.cuda()
+    #     else:
+    #         raise NotImplementedError
 
 
 
@@ -264,7 +305,7 @@ def resnet_multiimage_input(num_layers, pretrained=False, num_input_images=1):
     assert num_layers in [18, 50], "Can only run with 18 or 50 layer resnet"
     blocks = {18: [2, 2, 2, 2], 50: [3, 4, 6, 3]}[num_layers]
     block_type = {18: models.resnet.BasicBlock, 50: models.resnet.Bottleneck}[num_layers]
- 
+
     model = ResNetMultiImageInput(block_type, blocks, num_input_images=num_input_images)
 
     if pretrained:
@@ -427,7 +468,7 @@ class BackprojectDepth(nn.Module):
                                        requires_grad=False).cuda()
 
     def forward(self, depth, inv_K):
-    
+
         cam_points = torch.matmul(inv_K[:, :3, :3], self.pix_coords)
         cam_points = depth.cuda().view(self.batch_size, 1, -1) * cam_points
         cam_points = torch.cat([cam_points, self.ones], 1)
@@ -538,6 +579,4 @@ def rot_from_axisangle(vec):
     rot[:, 3, 3] = 1
 
     return rot
-
-
 
