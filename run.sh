@@ -28,6 +28,7 @@ python /vepfs-mlp2/c20250502/haoce/wangyushen/HTCL/tools/test.py \
   --out /vepfs-mlp2/c20250502/haoce/wangyushen/Outputs/htcl/val/ \
   --eval mAP
 
+# *============================================================#
 # * 多卡训练
 cd /vepfs-mlp2/c20250502/haoce/wangyushen/HTCL
 . /root/miniconda3/bin/activate

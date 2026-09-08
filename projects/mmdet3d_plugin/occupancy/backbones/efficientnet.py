@@ -103,7 +103,8 @@ class EdgeResidual(BaseModule):
                 return out
 
         if self.with_cp and x.requires_grad:
-            out = cp.checkpoint(_inner_forward, x)
+            # out = cp.checkpoint(_inner_forward, x)
+            out = cp.checkpoint(_inner_forward, x, use_reentrant=True)
         else:
             out = _inner_forward(x)
 
@@ -222,7 +223,8 @@ class InvertedResidual(BaseModule):
                 return out
 
         if self.with_cp and x.requires_grad:
-            out = cp.checkpoint(_inner_forward, x)
+            # out = cp.checkpoint(_inner_forward, x)
+            out = cp.checkpoint(_inner_forward, x, use_reentrant=True)
         else:
             out = _inner_forward(x)
 

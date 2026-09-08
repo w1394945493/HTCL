@@ -142,13 +142,15 @@ lidar_root = "/c20250502/wangyushen/Datasets/kitti/semantickitti/dataset/sequenc
 lidarseg_root = "/c20250502/wangyushen/Datasets/kitti/semantickitti/dataset/lidarseg"
 label_mapping = "/vepfs-mlp2/c20250502/haoce/wangyushen/HTCL/data/semantickitti.yaml"
 
+# ============================================================#
 # samples_per_gpu=2
 # workers_per_gpu=8
 samples_per_gpu=1
-workers_per_gpu=0
+workers_per_gpu=8
 max_epochs=30
-max_keep_ckpts=1
-interval=1
+max_keep_ckpts=1 # 最多模型保存数量
+save_interval=1  # 模型保存间隔
+interval=50 # 日志记录间隔
 
 file_client_args = dict(backend='disk')
 
@@ -235,7 +237,7 @@ lr_config = dict(
     step=[20, 25],
 )
 
-checkpoint_config = dict(max_keep_ckpts=max_keep_ckpts, interval=interval)
+checkpoint_config = dict(max_keep_ckpts=max_keep_ckpts, interval=save_interval)
 runner = dict(type='EpochBasedRunner', max_epochs=max_epochs)
 
 evaluation = dict(
@@ -243,4 +245,11 @@ evaluation = dict(
     pipeline=test_pipeline,
     save_best='semkitti_combined_IoU',
     rule='greater',
+)
+
+log_config = dict(
+    interval=interval, 
+    hooks=[
+        dict(type="TextLoggerHook"),
+        dict(type="TensorboardLoggerHook")]
 )
