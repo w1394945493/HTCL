@@ -151,30 +151,38 @@ class CustomSemanticKITTILssDataset(CustomSemanticKITTIDataset):
             example = self.pipeline(input_dict)  # 读取并处理当前帧的训练数据
             return example  # 返回处理完成的单帧训练样本
 
-    def prepare_test_data(self, index):
-        if self.queue_length>1:
-            queue = []
-            index_list = list(range(index-self.queue_length, index))
-            # random.shuffle(index_list)
-            index_list = sorted(index_list[1:])
-            index_list.append(index)
-            if index<3:
-                for i in range(0, len(index_list)): index_list[i]=index_list[i] if index_list[i]>0 else 0
+    def prepare_test_data(self, index):  # 根据当前样本索引准备单帧或多帧时序测试数据
+        if self.queue_length > 1:  # 时序长度大于 1 时进入多帧数据加载模式
+            queue = []  # 保存每一帧经过数据处理流水线后的结果
+            #! 原代码：仅处理整个数据集开头的负索引，无法避免在新序列开头跨序列取帧
+            # index_list = list(range(index-self.queue_length, index))
+            # # random.shuffle(index_list)
+            # index_list = sorted(index_list[1:])
+            # index_list.append(index)
+            # if index<3:
+            #     for i in range(0, len(index_list)): index_list[i]=index_list[i] if index_list[i]>0 else 0
 
-            for i in index_list:
-                i = max(0, i)
-                input_dict = self.get_data_info(i)
-                if input_dict is None:
-                    return None
-                self.pre_pipeline(input_dict)
-                example = self.pipeline(input_dict)
-                queue.append(example)
-            return self.union2one(queue)
-        else:
-            input_dict = self.get_data_info(index)
-            self.pre_pipeline(input_dict)
-            example = self.pipeline(input_dict)
-            return example
+            #! 修改代码：与训练阶段保持一致，避免跨序列读取历史帧
+            current_sequence = self.data_infos[index]["sequence"]  # 获取当前帧所属的序列
+            index_list = list(range(max(0, index - self.queue_length + 1), index + 1))  # 生成“历史帧 + 当前帧”的连续候选索引
+            index_list = [i for i in index_list if self.data_infos[i]["sequence"] == current_sequence]  # 删除属于其他序列的候选帧
+            index_list = [index_list[0]] * (self.queue_length - len(index_list)) + index_list  # 序列开头历史帧不足时重复该序列的首个有效帧
+
+            for i in index_list:  # 按“最早历史帧 → 当前帧”的顺序处理各帧
+                input_dict = self.get_data_info(i)  # 获取该帧的图像路径、标定参数和体素标签等信息
+                if input_dict is None:  # 检查该帧的数据索引是否有效
+                    return None  # 任意一帧无效时放弃构造当前测试样本
+                self.pre_pipeline(input_dict)  # 初始化数据处理流水线需要的字段
+                example = self.pipeline(input_dict)  # 读取并处理该帧的测试数据
+                queue.append(example)  # 将处理完成的帧加入时序队列
+            return self.union2one(queue)  # 沿时间维堆叠多帧数据，并返回以当前帧为目标的测试样本
+        else:  # 时序长度不大于 1 时使用单帧数据加载模式
+            input_dict = self.get_data_info(index)  # 获取当前帧的数据字典
+            if input_dict is None:  # 检查当前帧的数据索引是否有效
+                return None  # 当前帧无效时不生成测试样本
+            self.pre_pipeline(input_dict)  # 初始化数据处理流水线需要的字段
+            example = self.pipeline(input_dict)  # 读取并处理当前帧的测试数据
+            return example  # 返回处理完成的单帧测试样本
 
 
 
@@ -189,21 +197,6 @@ class CustomSemanticKITTILssDataset(CustomSemanticKITTIDataset):
         imgs_feature1 = [torch.tensor(np.asarray(each['img_inputs'][1][-1].data)) for each in queue]
         queue[-1]['img_inputs'][0][-1] = DC(torch.stack(imgs_feature0), cpu_only=False, stack=True)
         queue[-1]['img_inputs'][1][-1] = DC(torch.stack(imgs_feature1), cpu_only=False, stack=True)
-
-        # metas_map = {}
-        # gt_occ = {}
-        # points_occ = {}
-        # points_uv = {}
-        # for i, each in enumerate(queue):
-        #     metas_map[i] = each['img_metas'].data
-        #     gt_occ[i] = each['gt_occ'].data
-        #     points_occ[i] = each['points_occ'].data
-        #     points_uv[i] = each['points_uv'].data
-        #     metas_map[i]['prev_bev_exists'] = False
-        # queue[-1]['img_metas'] = DC(metas_map, cpu_only=True)
-        # queue[-1]['gt_occ'] = DC(gt_occ, cpu_only=True)
-        # queue[-1]['points_occ'] = DC(points_occ, cpu_only=True)
-        # queue[-1]['points_uv'] = DC(points_uv, cpu_only=True)
 
         queue = queue[-1]
         return queue

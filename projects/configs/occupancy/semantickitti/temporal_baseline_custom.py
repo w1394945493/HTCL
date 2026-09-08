@@ -135,7 +135,7 @@ model = dict(
     queue_length=queue_length,
 )
 
-dataset_type = 'CustomSemanticKITTILssDataset'
+dataset_type = 'CustomSemanticKITTILssDataset' #! KITTILSSDataset
 data_root = "/c20250502/wangyushen/Datasets/kitti/semantickitti"
 ann_file = "/c20250502/wangyushen/Datasets/kitti/semantickitti/dataset/labels"
 lidar_root = "/c20250502/wangyushen/Datasets/kitti/semantickitti/dataset/sequences"
