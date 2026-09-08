@@ -1,4 +1,3 @@
-
 import os
 import json
 import argparse
@@ -11,7 +10,7 @@ from collections import OrderedDict
 import torch
 from torchvision import transforms
 import sys
-sys.path.append("projects/mmdet3d_plugin/occupancy/image2bev/manydepth/")
+# sys.path.append("projects/mmdet3d_plugin/occupancy/image2bev/manydepth/")
 import networks
 from torch.autograd import Variable
 
@@ -36,7 +35,6 @@ class temporal_encoder(torch.nn.Module):
             if name.startswith("pose"):
                 p.requires_grad = False
 
-
     def load_and_preprocess_image(self, image ):
 
         batch, channel, original_width, original_height = image.shape
@@ -57,12 +55,11 @@ class temporal_encoder(torch.nn.Module):
     #     K = Variable(K, requires_grad=True).cuda()
     #     return K , invK
 
-
     def forward(self, ref_images, source_images, intrinsics, calib=None ):
-        B, T, C, H, W = source_images.shape # (1 3 3 384 1280)
+        B, T, C, H, W = source_images.shape # (1 3 3 384 1280) 历史帧图像(前三帧)
         combined_waped_feature = torch.zeros( B, T, self.maxdisp, H//4, W//4 ).cuda() # (1 3 112 96 320)
 
-        height, width = ref_images.shape[-2: ] # 384 1280
+        height, width = ref_images.shape[-2: ] # 384 1280 当前帧图像
 
         # 注释原代码
         # intrinsics =  intrinsics.squeeze(1).cpu().detach().numpy() # (1 4 4)
@@ -82,20 +79,22 @@ class temporal_encoder(torch.nn.Module):
 
         # *==============================================#
         # * 对应论文第 3.2 节：将当前帧分别与每个历史帧组成图像对
-        ref_image = ref_images.squeeze(1)
+        ref_image = ref_images.squeeze(1) # (1 3 384 1280)
         for temporal in range(0, T):
-            source_image = source_images[:, temporal, ...]
+            source_image = source_images[:, temporal, ...] # (1 3 384 1280)
             input_image, original_size = self.load_and_preprocess_image(ref_image )
             source_image, _ = self.load_and_preprocess_image(source_image )
+            # *===========================================#
             # * 使用 PoseNet 根据当前图像与历史图像估计相对位姿；相机内参用于后续几何 warp
             with torch.no_grad():
-            # Estimate poses
+                # Estimate poses
                 pose_inputs = [source_image, input_image]
                 pose_inputs = self.pose_enc(torch.cat(pose_inputs, 1))
                 pose_inputs = [ pose_inputs ]
-                axisangle, translation = self.pose_dec(pose_inputs) # * 输出相对旋转的轴角表示与相对平移
-                pose = networks.transformation_from_parameters(axisangle[:, 0], translation[:, 0], invert=True)
-
+                axisangle, translation = self.pose_dec(pose_inputs) # (1 2 1 3) (1 2 1 3) # * 输出相对旋转的轴角表示与相对平移 
+                pose = networks.transformation_from_parameters(axisangle[:, 0], translation[:, 0], invert=True) # (1 4 47)
+            
+            # *===========================================#
             # * Homography warping / feature matching：基于相对位姿和相机内参，将历史特征对齐到当前帧
             curr_feature, batch_waped_feature  = self.encoder(current_image=input_image, # * 当前图像
                                             lookup_images=source_image.unsqueeze(1),     # * 历史图像
