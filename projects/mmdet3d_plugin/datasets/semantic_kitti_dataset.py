@@ -168,6 +168,7 @@ class CustomSemanticKITTIDataset(SemanticKITTIDataset):
         random.shuffle(index_list)
         index_list = sorted(index_list[1:])
         index_list.append(index)
+
         for i in index_list:
             i = max(0, i)
             input_dict = self.get_data_info(i)

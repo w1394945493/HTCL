@@ -117,39 +117,6 @@ class CustomSemanticKITTILssDataset(CustomSemanticKITTIDataset):
 
         return sampled_infos
 
-    # def prepare_train_data(self, index):
-    #     """
-    #     Training data preparation.
-    #     Args:
-    #         index (int): Index for accessing the target data.
-    #     Returns:
-    #         dict: Training data dict of the corresponding index.
-    #     """
-
-    #     input_dict = self.get_data_info(index)
-    #     if input_dict is None:
-    #         return None
-
-    #     self.pre_pipeline(input_dict)
-    #     example = self.pipeline(input_dict)
-
-    #     return example
-
-    # def prepare_test_data(self, index):
-    #     """Prepare data for testing.
-
-    #     Args:
-    #         index (int): Index for accessing the target data.
-
-    #     Returns:
-    #         dict: Testing data dict of the corresponding index.
-    #     """
-    #     input_dict = self.get_data_info(index)
-    #     self.pre_pipeline(input_dict)
-    #     example = self.pipeline(input_dict)
-    #     return example
-
-
     def prepare_train_data(self, index):  # 根据当前样本索引准备单帧或多帧时序训练数据
         if self.queue_length > 1:  # 时序长度大于 1 时进入多帧数据加载模式
             queue = []  # 保存每一帧经过数据处理流水线后的结果
