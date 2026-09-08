@@ -61,7 +61,7 @@ class BEVDepthOccupancy(BEVDepth):
         self.grid_mask = GridMask(
             True, True, rotate=1, offset=False, ratio=0.5, mode=1, prob=0.7)
 
-        self.record_time = False
+        self.record_time = False # 目前写死为False
         self.time_stats = collections.defaultdict(list)
 
     def image_encoder(self, img):
@@ -72,14 +72,14 @@ class BEVDepthOccupancy(BEVDepth):
         if self.use_grid_mask:
             imgs = self.grid_mask(imgs)
         # * 使用 EfficientNet-B7 主干提取多尺度图像特征
-        x = self.img_backbone(imgs)
+        x = self.img_backbone(imgs) # 5:(1 48 96 320) (1 80 48 160) (1 224 24 80) (1 640 12 40) (1 2560 12 40)
 
         # * 使用 SECONDFPN 对多尺度特征进行上采样与融合
         if self.with_img_neck:
             x = self.img_neck(x)
             if type(x) in [list, tuple]:
                 x = x[0]
-        _, output_dim, ouput_H, output_W = x.shape
+        _, output_dim, ouput_H, output_W = x.shape # (1 640 48 160)
         x = x.view(B, N, output_dim, ouput_H, output_W)
 
         return x
@@ -135,13 +135,13 @@ class BEVDepthOccupancy(BEVDepth):
 
 
         img_left, img_right = img[0][0], img[1][0]  ### B Temporal N C H W # (1 4 1 3 384 1280) (1 4 1 3 384 1280)
-        B, T, N, C, H, W = img_left.shape
-
-        img_left_ref, img_right_ref = img_left[ :, -1, ... ], img_right[ :, -1, ... ]
-        img_left_sour, img_right_sour = img_left[:,:-1, ... ].squeeze(2).contiguous(), img_right[:,:-1, ... ].squeeze(2).contiguous()
+        B, T, N, C, H, W = img_left.shape # (1 4 1 3 384 1280) 
+        # 取当前帧图像
+        img_left_ref, img_right_ref = img_left[ :, -1, ... ], img_right[ :, -1, ... ] # (1 1 3 384 1280) (1 1 3 384 1280)
+        img_left_sour, img_right_sour = img_left[:,:-1, ... ].squeeze(2).contiguous(), img_right[:,:-1, ... ].squeeze(2).contiguous() # (1 3 3 384 1280)
 
         # * 仅编码当前参考帧：EfficientNet-B7 + SECONDFPN 对应论文中的图像特征提取网络
-        img_left_ref_feature = self.image_encoder( img_left_ref )
+        img_left_ref_feature = self.image_encoder( img_left_ref ) # (1 1 640 48 160)
 
         x, x2 = img_left_ref_feature, None
         img_feats = x.clone()
@@ -150,7 +150,7 @@ class BEVDepthOccupancy(BEVDepth):
         filenamesl, filenamesr = img[-1], img2[-1]
 
 
-        if self.record_time:
+        if self.record_time: # 用于统计图像编码器实际耗时
             torch.cuda.synchronize()
             t1 = time.time()
             self.time_stats['img_encoder'].append(t1 - t0)
@@ -160,14 +160,18 @@ class BEVDepthOccupancy(BEVDepth):
         rots2, trans2, intrins2, post_rots2, post_trans2, bda2 = img2[1:7]
 
 
-        mlp_input = self.img_view_transformer.get_mlp_input(rots, trans, intrins, post_rots, post_trans, bda)
+        mlp_input = self.img_view_transformer.get_mlp_input(rots, trans, intrins, post_rots, post_trans, bda) # (1 1 30)
         mlp_input2 = self.img_view_transformer.get_mlp_input(rots2, trans2, intrins2, post_rots2, post_trans2, bda2)
 
         geo_inputs = [rots, trans, intrins, post_rots, post_trans, bda, mlp_input]
         geo_inputs2 = [rots2, trans2, intrins2, post_rots2, post_trans2, bda2, mlp_input2]
 
         calib = img[9]
-
+        
+        # *====================================================#
+        # img_view_transformer: ViewTransformerLSSVoxel
+        # 1. 体素特征构建：lift-splat策略
+        # 2. 对齐时序体构建
         x, depth, temporal_voxel = self.img_view_transformer([x] + geo_inputs + [x2] + geo_inputs2 + [calib]+ [img, img2], gt, mode, img[0], img2[0], filenamesl, filenamesr)
 
 

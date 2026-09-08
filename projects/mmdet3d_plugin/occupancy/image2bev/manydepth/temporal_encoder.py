@@ -20,7 +20,7 @@ from torch.autograd import Variable
 class temporal_encoder(torch.nn.Module):
     def __init__(self, maxdisp, width, height  ):
         super(temporal_encoder, self).__init__()
-        self.maxdisp = maxdisp
+        self.maxdisp = maxdisp # 112
         # * ==============================================#
         # * 定义轻量级 PoseNet 和基于深度假设平面的时序匹配编码器
         self.pose_enc = networks.ResnetEncoder(18, False, num_input_images=2)
@@ -58,13 +58,13 @@ class temporal_encoder(torch.nn.Module):
 
 
     def forward(self, ref_images, source_images, intrinsics, calib=None ):
-        B, T, C, H, W = source_images.shape
-        combined_waped_feature = torch.zeros( B, T, self.maxdisp, H//4, W//4 ).cuda()
+        B, T, C, H, W = source_images.shape # (1 3 3 384 1280)
+        combined_waped_feature = torch.zeros( B, T, self.maxdisp, H//4, W//4 ).cuda() # (1 3 112 96 320)
 
-        height, width = ref_images.shape[-2: ]
-        intrinsics =  intrinsics.squeeze(1).cpu().detach().numpy()
+        height, width = ref_images.shape[-2: ] # 384 1280
+        intrinsics =  intrinsics.squeeze(1).cpu().detach().numpy() # (1 4 4)
 
-        K, invK = torch.zeros_like( torch.tensor(intrinsics)).cuda() , torch.zeros_like( torch.tensor(intrinsics)).cuda()
+        K, invK = torch.zeros_like( torch.tensor(intrinsics)).cuda() , torch.zeros_like( torch.tensor(intrinsics)).cuda() # (1 4 4) (1 4 4)
         for batch in range( 0, B ):
             K_, invK_ = self.load_and_preprocess_intrinsics(intrinsics[batch], width, height)
             K_ = Variable(K_, requires_grad=True).cuda()

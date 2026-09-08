@@ -85,7 +85,6 @@ class temporal_interaction(nn.Module):
         return data3, [data1, data2]
 
 
-
 @NECKS.register_module()
 class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
     def __init__(
@@ -128,8 +127,6 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
                                                 nn.ReLU(inplace=True),
                                                 nn.Conv3d(64, 384, kernel_size=3, padding=1, stride=1, bias=False))
 
-
-
         self.semkitti = semkitti
 
         self.loss_depth_type = loss_depth_type
@@ -157,7 +154,6 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
                 nn.Linear(in_features=mid_channel, out_features=self.point_xyz_channel),
             )
 
-
         ''' Auxiliary task: image-view segmentation '''
         self.imgseg = imgseg
         if self.imgseg:
@@ -174,7 +170,6 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
             )
 
         self.forward_dic = {}
-
 
     def get_downsampled_gt_depth(self, gt_depths):
         """
@@ -233,7 +228,6 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
         gt_depths = gt_depths.permute(0, 3, 1, 2).contiguous()
         gt_depths = gt_depths.unsqueeze(1)
 
-
         return gt_depths.float()
 
     @force_fp32()
@@ -263,7 +257,6 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
         mask.detach_()
         loss = F.smooth_l1_loss(depth_preds[mask], depth_labels[mask], reduction='mean')
         return loss
-
 
     @force_fp32()
     def get_klv_depth_loss(self, depth_labels, depth_preds):
@@ -364,48 +357,45 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
 
         calib = input[16]
 
-        # * 从时序队列中取最后一帧的左右图像，作为当前帧双目输入
-        if  imgl.shape[1]>1:
-            imgl, imgr = imgl[:, -1, ...], imgr[:, -1, ...] # * 时序队列最后一帧的左右图像
-        imgl, imgr = F.interpolate(imgl.squeeze(1), size=[288, 960], mode='bilinear', align_corners=True), F.interpolate(imgr.squeeze(1), size=[288, 960], mode='bilinear', align_corners=True)
         # *=============================================#
-        # * 使用 LEAStereo 构建当前帧双目深度代价体
-        stereo_volume = self.leamodel(imgl, imgr, calib )["classfy_volume"] # * LEAStereo使用192维度，插值后的LSS离散深度数112
-        stereo_volume = F.interpolate(stereo_volume, size=[ 112, H, W ], mode='trilinear', align_corners=True).squeeze(1)
-        stereo_volume = F.softmax(-stereo_volume, dim=1)
-
+        # * 1.概率深度分布估计
+        if  imgl.shape[1]>1:
+            imgl, imgr = imgl[:, -1, ...], imgr[:, -1, ...] # (1 1 3 384 1280) # * 时序队列最后一帧的左右图像
+        imgl, imgr = F.interpolate(imgl.squeeze(1), size=[288, 960], mode='bilinear', align_corners=True), F.interpolate(imgr.squeeze(1), size=[288, 960], mode='bilinear', align_corners=True) # (1 3 288 960)
+        # *=============================================#
+        # * 1.1 双目深度估计：使用 LEAStereo 构建当前帧双目深度代价体
+        stereo_volume = self.leamodel(imgl, imgr, calib )["classfy_volume"] # (1 1 64 96 320)
+        stereo_volume = F.interpolate(stereo_volume, size=[ 112, H, W ], mode='trilinear', align_corners=True).squeeze(1) # (1 112 48 160)
+        stereo_volume = F.softmax(-stereo_volume, dim=1) # (1 112 48 160)
 
         if self.imgseg:
             self.forward_dic['imgseg_logits'] = self.img_seg_head(x)
-        # * depth_net 同时预测每个像素的上下文特征和离散深度 logits
-        x = self.depth_net(x, mlp_input)
-        depth_digit = x[:, :self.D, ...]
-        img_feat = x[:, self.D:self.D + self.numC_Trans, ...] # * 每个像素的上下文特征
-        depth_prob = self.get_depth_dist(depth_digit) # * 每个像素的离散深度分布
         # *=============================================#
-        # * 融合双目深度代价体与 LSS 分支预测的深度分布
+        # * 1.2 单目深度估计：延续CGFormer工作，单目深度估计分支和上下文分支
+        x = self.depth_net(x, mlp_input) 
+        depth_digit = x[:, :self.D, ...] # (1 112 48 160)
+        img_feat = x[:, self.D:self.D + self.numC_Trans, ...] # (1 128 48 160) # * 每个像素的上下文特征
+        depth_prob = self.get_depth_dist(depth_digit) # (1 112 48 160) # * 每个像素的离散深度分布
+        # *=============================================#
+        # * 1.3 融合双目深度代价体与 LSS 分支预测的深度分布
         depth_prob, auxility = self.volume_interaction(stereo_volume, depth_prob)
-
 
         if self.imgseg and self.lift_with_imgseg:
             img_segprob = torch.softmax(self.forward_dic['imgseg_logits'], dim=1)
             img_feat = torch.cat((img_feat, img_segprob), dim=1)
         # *=============================================#
-        # * Lift：通过深度概率与图像上下文特征的外积构建视锥特征体
-        # Lift
-        volume = depth_prob.unsqueeze(1) * img_feat.unsqueeze(2)
-        volume = volume.view(B, N, -1, self.D, H, W)
-        volume = volume.permute(0, 1, 3, 4, 5, 2)
-        # * Splat：根据相机几何关系将视锥特征汇聚到 3D 体素空间，得到 Vvox
-        # Splat
-        geom = self.get_geometry(rots, trans, intrins, post_rots, post_trans, bda)
-        bev_feat = self.voxel_pooling(geom, volume)
+        # * 1.4 Lift：通过深度概率与图像上下文特征的外积构建视锥特征体
+        volume = depth_prob.unsqueeze(1) * img_feat.unsqueeze(2) # (1 128 112 48 160)
+        volume = volume.view(B, N, -1, self.D, H, W) # (1 1 128 112 48 160)
+        volume = volume.permute(0, 1, 3, 4, 5, 2) # (1 1 112 48 160 128)
+        # * 1.5 Splat：根据相机几何关系将视锥特征汇聚到 3D 体素空间，得到128x128x16，维度为128维的体素特征
+        geom = self.get_geometry(rots, trans, intrins, post_rots, post_trans, bda) # (1 1 112 48 160 3)
+        bev_feat = self.voxel_pooling(geom, volume) # (1 128 128 128 16)
 
         # *=============================================#
-        # * Aligned Temporal Volume Construction：将历史帧特征对齐到当前参考帧
-        img_left_ref, img_left_sour = left_input[:, -1, ...].unsqueeze(1).permute(0,1,4,2,3).cuda(), left_input[:,:-1, ...].permute(0,1,4,2,3).cuda()  #
+        # * 2. 对齐时序体构建 Aligned Temporal Volume Construction ：将历史帧特征对齐到当前参考帧
+        img_left_ref, img_left_sour = left_input[:, -1, ...].unsqueeze(1).permute(0,1,4,2,3).cuda(), left_input[:,:-1, ...].permute(0,1,4,2,3).cuda()  # (1 1 3 384 1280) (1 3 3 384 1280)
         curr_feature, batch_waped_feature = self.temporal_encoder( ref_images=img_left_ref, source_images=img_left_sour, intrinsics=intrins ) #
-
 
         curr_feature = F.interpolate(curr_feature, size=[H, W], mode='bilinear', align_corners=True)
         batch_waped_feature = F.interpolate(batch_waped_feature, size=[self.D, H, W], mode='trilinear', align_corners=True)
@@ -427,6 +417,5 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
         # * 进一步编码时序体素特征，得到可靠时序体素 Ṽtem
         temporal_volume =  self.temporal_hourglass(temporal_volume )
         temporal_voxel = [temporal_volume]
-
 
         return bev_feat, depth_prob, temporal_voxel
