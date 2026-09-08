@@ -83,7 +83,7 @@ class temporal_encoder(torch.nn.Module):
         # *==============================================#
         # * 对应论文第 3.2 节：将当前帧分别与每个历史帧组成图像对
         ref_image = ref_images.squeeze(1) # (1 3 384 1280)
-        for temporal in range(0, T):
+        for temporal in range(0, T): # T:3
             source_image = source_images[:, temporal, ...] # (1 3 384 1280)
             input_image, original_size = self.load_and_preprocess_image(ref_image )
             source_image, _ = self.load_and_preprocess_image(source_image )
@@ -105,11 +105,11 @@ class temporal_encoder(torch.nn.Module):
             # *===========================================#
             # * Homography warping / feature matching：基于相对位姿和相机内参，将历史特征对齐到当前帧
             # * 使用ManyDepth风格的resnet18，在1/4尺度的二维图像特征图上，利用相机几何约束进行跨帧特征匹配
-            curr_feature, batch_waped_feature  = self.encoder(current_image=input_image, # * 当前图像
-                                            lookup_images=source_image.unsqueeze(1),     # * 历史图像
-                                            poses=pose.unsqueeze(1),                     # * 相对位姿
-                                            K=K,                                         # * 相机内参
-                                            invK=invK)                                   # * 逆内参
+            curr_feature, batch_waped_feature  = self.encoder(current_image=input_image, # (1 3 384 1280) # * 当前图像
+                                            lookup_images=source_image.unsqueeze(1),     # (1 1 3 384 1280) # * 历史图像
+                                            poses=pose.unsqueeze(1),                     # (1 1 4 4) * 相对位姿
+                                            K=K,                                         # (1 4 4) * 相机内参
+                                            invK=invK)                                   # (1 4 4) * 逆内参
             combined_waped_feature[:, temporal,:,:,:] = batch_waped_feature.squeeze(1)
 
         return  curr_feature, combined_waped_feature

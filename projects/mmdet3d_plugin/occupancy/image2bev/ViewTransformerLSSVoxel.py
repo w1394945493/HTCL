@@ -400,22 +400,22 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
         curr_feature = F.interpolate(curr_feature, size=[H, W], mode='bilinear', align_corners=True)
         batch_waped_feature = F.interpolate(batch_waped_feature, size=[self.D, H, W], mode='trilinear', align_corners=True)
         # * ADR：使用多级可变形卷积动态细化历史特征的采样位置
-        defomable_batch_waped_feature = self.temporal_deformable( batch_waped_feature )
+        defomable_batch_waped_feature = self.temporal_deformable(batch_waped_feature)
         # * CPA：提取当前帧与对齐历史帧的多尺度局部 pattern
-        curr_feature = self.curr_patch( curr_feature )
-        batch_waped_feature = self.warped_patch( batch_waped_feature )
+        curr_feature = self.curr_patch(curr_feature)
+        batch_waped_feature = self.warped_patch(batch_waped_feature)
 
         # * 计算当前 pattern 与历史 pattern 的余弦相似度，得到跨帧亲和度
         temporal_volume = self.cossim(  (curr_feature-curr_feature.mean(1).unsqueeze(1)).unsqueeze(2).repeat(1,1,self.D,1,1), (batch_waped_feature-batch_waped_feature.mean(1).unsqueeze(1)) ).unsqueeze(1)
         temporal_volume = (temporal_volume) * defomable_batch_waped_feature # * 使用 CPA 亲和度对 ADR 细化后的历史特征进行加权
         # * 对 CPA 加权后的可靠时序内容进行 3D Hourglass 编码
-        temporal_volume = self.temporal_prehourglass( temporal_volume )
+        temporal_volume = self.temporal_prehourglass(temporal_volume)
         # * 将时序视锥特征汇聚到 3D 体素空间
         temporal_volume = temporal_volume.view(B, N, -1, self.D, H, W)
         temporal_volume = temporal_volume.permute(0, 1, 3, 4, 5, 2)
         temporal_volume = self.voxel_pooling(geom, temporal_volume)
         # * 进一步编码时序体素特征，得到可靠时序体素 Ṽtem
-        temporal_volume =  self.temporal_hourglass(temporal_volume )
+        temporal_volume =  self.temporal_hourglass(temporal_volume)
         temporal_voxel = [temporal_volume]
 
         return bev_feat, depth_prob, temporal_voxel

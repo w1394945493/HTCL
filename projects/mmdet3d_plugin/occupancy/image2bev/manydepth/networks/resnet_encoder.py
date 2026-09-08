@@ -1,4 +1,3 @@
-
 # import os
 import numpy as np
 # from einops import rearrange
@@ -9,7 +8,6 @@ import torchvision.models as models
 import torch.utils.model_zoo as model_zoo
 # from typing import Type, Any, Callable, Union, List, Optional
 from .temporal_retrieve  import *
-
 
 
 class ResnetEncoderMatching(nn.Module):
@@ -24,7 +22,6 @@ class ResnetEncoderMatching(nn.Module):
                  adaptive_bins=False, depth_binning='linear'):
 
         super(ResnetEncoderMatching, self).__init__()
-
 
         # self.cos = nn.CosineSimilarity(dim=1, eps=1e-6)
 
@@ -48,8 +45,6 @@ class ResnetEncoderMatching(nn.Module):
         self.layer0 = nn.Sequential(encoder.conv1,  encoder.bn1, encoder.relu)
         self.layer1 = nn.Sequential(encoder.maxpool,  encoder.layer1)
 
-
-
         self.backprojector = BackprojectDepth(batch_size=self.num_depth_bins,
                                               height=self.matching_height,
                                               width=self.matching_width)
@@ -58,7 +53,7 @@ class ResnetEncoderMatching(nn.Module):
                                    width=self.matching_width)
 
         # *====================================================#
-        #* 新增代码
+        # * 新增代码
         # HTCL 使用固定深度范围，因此在初始化时生成一次深度假设，避免每次 forward 重复计算
         if self.depth_binning == 'linear':  # 在深度空间中均匀采样
             depth_bins = torch.linspace(
@@ -82,7 +77,6 @@ class ResnetEncoderMatching(nn.Module):
                 -1, 1, self.matching_height, self.matching_width),
             persistent=False,
         )
-
 
     #! 注释的原代码
     # def compute_depth_bins(self, min_depth_bin, max_depth_bin):
@@ -119,7 +113,6 @@ class ResnetEncoderMatching(nn.Module):
         If relative_pose == 0 then this indicates that the lookup frame is missing (i.e. we are
         at the start of a sequence), and so we skip it"""
 
-
         batch_waped_feature = []
 
         # with torch.no_grad():
@@ -132,7 +125,6 @@ class ResnetEncoderMatching(nn.Module):
             _invK = invK[batch_idx:batch_idx + 1]
 
             world_points = self.backprojector(self.warp_depths, _invK)
-
 
             waped_feature = []
             # loop through ref images adding to the current cost volume
@@ -150,22 +142,15 @@ class ResnetEncoderMatching(nn.Module):
                                     align_corners=True)  #
                 waped_feature.append(warped)
 
-
-
             waped_feature= torch.stack(waped_feature, 0)
             batch_waped_feature.append(waped_feature)
-
-
-
 
         batch_waped_feature = torch.stack(batch_waped_feature, 0)
 
         batch_waped_feature = batch_waped_feature.squeeze(1).permute(0,2,1,3,4)
         batch_waped_feature = batch_waped_feature.mean(1)
 
-
         return batch_waped_feature
-
 
     def feature_extraction(self, image, return_all_feats=False):
         """ Run feature extraction on an image - first 2 blocks of ResNet"""
@@ -200,8 +185,9 @@ class ResnetEncoderMatching(nn.Module):
 
         # * 提取当前帧特征
         # 使用共享的 ResNet 编码器提取当前帧多尺度特征
-        self.features = self.feature_extraction(current_image, return_all_feats=True)  # 返回所有尺度的特征，供当前分支及后续网络使用
-        current_feats = self.features[-1]  # 取最后一级特征作为帧间几何匹配的当前帧特征
+        # self.features = self.feature_extraction(current_image, return_all_feats=True)  # 返回所有尺度的特征，供当前分支及后续网络使用
+        # current_feats = self.features[-1]  # 取最后一级特征作为帧间几何匹配的当前帧特征
+        current_feats = self.feature_extraction(current_image, return_all_feats=False) # (1 64 96 320)
 
         # * 整理历史帧输入并生成用于几何匹配的深度假设平面
         #! 注释的原代码
@@ -213,25 +199,25 @@ class ResnetEncoderMatching(nn.Module):
         #     # 合并 batch 维和时间维，以便一次送入二维图像编码器
         #     lookup_images = lookup_images.reshape(batch_size * num_frames, chns, height, width)  # (B, T, C, H, W) → (B×T, C, H, W)
 
-        #* 新增代码
+        # * 新增代码
         batch_size, num_frames, chns, height, width = lookup_images.shape  # 解析历史图像形状：(B, T, C, H, W)
         # 合并 batch 维和时间维，以便批量提取历史帧特征
         lookup_images = lookup_images.reshape(batch_size * num_frames, chns, height, width)  # (B, T, C, H, W) → (B×T, C, H, W)
 
         # 使用与当前帧共享的编码器提取所有历史帧特征
-        lookup_feats = self.feature_extraction(lookup_images, return_all_feats=False)  # 只返回几何匹配所需的最后一级特征
+        lookup_feats = self.feature_extraction(lookup_images, return_all_feats=False)  # (1 64 96 320) # 只返回几何匹配所需的最后一级特征
         _, chns, height, width = lookup_feats.shape  # 读取历史特征的通道数和空间尺寸
         # 恢复历史帧的 batch 维和时间维
-        lookup_feats = lookup_feats.reshape(batch_size, num_frames, chns, height, width)  # (B×T, C, h, w) → (B, T, C, h, w)
+        lookup_feats = lookup_feats.reshape(batch_size, num_frames, chns, height, width)  # (1 1 64 96 320) # (B×T, C, h, w) → (B, T, C, h, w)
 
         # *==============================================================#
         # * 基于相对位姿、相机内参和多深度假设，将历史特征反向采样到当前帧视角
         batch_waped_feature = self.match_features(  # 对历史特征执行几何 warp，构建对齐后的时序特征体
-            current_feats,  # 当前帧特征，用于确定 batch 和目标视角
-            lookup_feats,  # 尚未对齐的历史帧特征
-            poses,  # 当前帧与各历史帧之间的相对位姿
-            K,  # 特征图尺度下的相机内参矩阵
-            invK,  # 相机内参伪逆，用于将二维像素反投影到三维空间
+            current_feats,  # (1 64 96 320) # 当前帧特征，用于确定 batch 和目标视角
+            lookup_feats, # (1 1 64 96 320) # 尚未对齐的历史帧特征
+            poses,  # (1 1 4 4) # 当前帧与各历史帧之间的相对位姿
+            K,  # (1 4 4) # 特征图尺度下的相机内参矩阵
+            invK,  # (1 4 4) # 相机内参伪逆，用于将二维像素反投影到三维空间
         )
 
         return current_feats, batch_waped_feature  # 返回当前帧特征及对齐后的历史时序特征体
@@ -261,11 +247,9 @@ class ResnetEncoderMatching(nn.Module):
     #         raise NotImplementedError
 
 
-
 def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
     """1x1 convolution"""
     return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
-
 
 
 class ResNetMultiImageInput(models.ResNet):
@@ -294,7 +278,6 @@ class ResNetMultiImageInput(models.ResNet):
                 nn.init.constant_(m.bias, 0)
 
 
-
 def resnet_multiimage_input(num_layers, pretrained=False, num_input_images=1):
     """Constructs a ResNet model.
     Args:
@@ -314,8 +297,6 @@ def resnet_multiimage_input(num_layers, pretrained=False, num_input_images=1):
             [loaded['conv1.weight']] * num_input_images, 1) / num_input_images
         model.load_state_dict(loaded)
     return model
-
-
 
 
 class ResnetEncoder(nn.Module):
@@ -359,7 +340,6 @@ class ResnetEncoder(nn.Module):
         self.features.append(self.encoder.layer4(self.features[-1]))
 
         return self.features
-
 
 
 def transformation_from_parameters(axisangle, translation, invert=False):
@@ -438,8 +418,6 @@ def rot_from_axisangle(vec):
     rot[:, 3, 3] = 1
 
     return rot
-
-
 
 
 class BackprojectDepth(nn.Module):
@@ -502,7 +480,6 @@ class Project3D(nn.Module):
         return pix_coords
 
 
-
 def transformation_from_parameters(axisangle, translation, invert=False):
     """Convert the network's (axisangle, translation) output into a 4x4 matrix
     """
@@ -579,4 +556,3 @@ def rot_from_axisangle(vec):
     rot[:, 3, 3] = 1
 
     return rot
-
