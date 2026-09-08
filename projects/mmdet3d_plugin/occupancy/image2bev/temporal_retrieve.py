@@ -5,9 +5,7 @@ import numpy as np
 from einops import rearrange
 import torch.nn.functional as F
 
-import  sys
-sys.path.append('projects/mmdet3d_plugin/occupancy/image2bev/')
-from dcn.modules.deform_conv import DeformConvPack_d
+from .dcn.modules.deform_conv import DeformConvPack_d
 
 
 class Build_gwc_volume_unfold(nn.Module):

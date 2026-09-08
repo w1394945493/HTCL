@@ -8,8 +8,8 @@ import torch
 import torch.nn as nn
 from torch.autograd import gradcheck
 
-from dcn.modules.deform_conv import DeformConv, _DeformConv, DeformConvPack
-from dcn.modules.deform_conv import DeformConv_d, _DeformConv, DeformConvPack_d
+from .modules.deform_conv import DeformConv, _DeformConv, DeformConvPack
+from .modules.deform_conv import DeformConv_d, _DeformConv, DeformConvPack_d
 
 deformable_groups = 1
 B, inC, inT, inH, inW = 2, 8, 16, 16, 16
@@ -92,4 +92,3 @@ if __name__ == '__main__':
     print('============option for deformable dimension===========')
     example_dconv_d()  # DCN using its own offsets
     example_dconv_offset_d()  # DCN using extra offsets
-

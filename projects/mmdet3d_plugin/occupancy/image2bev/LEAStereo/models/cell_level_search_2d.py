@@ -1,6 +1,6 @@
 import torch.nn.functional as F
-from models.operations_2d import *
-from models.genotypes_2d import PRIMITIVES
+from .operations_2d import *
+from .genotypes_2d import PRIMITIVES
 
 class MixedOp(nn.Module):
 

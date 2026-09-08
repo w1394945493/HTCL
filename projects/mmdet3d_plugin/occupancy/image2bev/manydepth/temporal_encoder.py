@@ -9,9 +9,6 @@
 
 import torch
 # from torchvision import transforms
-import sys
-# sys.path.append("projects/mmdet3d_plugin/occupancy/image2bev/manydepth/")
-# import networks
 from torch.autograd import Variable
 from .networks import ResnetEncoder,PoseDecoder,ResnetEncoderMatching,transformation_from_parameters
 

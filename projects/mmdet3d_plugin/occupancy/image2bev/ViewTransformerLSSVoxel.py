@@ -18,15 +18,13 @@ import numpy as np
 from collections import OrderedDict
 from PIL import Image
 import pdb
-import sys
 from .ViewTransformerLSSBEVDepth import *
 from .semkitti_depthnet import SemKITTIDepthNet
 from .temporal_retrieve  import *
 norm_cfg = dict(type='GN', num_groups=2, requires_grad=True)
-from gwc_encoder import *
-sys.path.append('projects/mmdet3d_plugin/occupancy/image2bev/')
-from LEAStereo.LEAStereo import LEA_encoder
-from  manydepth.temporal_encoder import  temporal_encoder
+from .gwc_encoder import *
+from .LEAStereo.LEAStereo import LEA_encoder
+from .manydepth.temporal_encoder import temporal_encoder
 
 
 class volume_interaction(nn.Module):

@@ -4,19 +4,10 @@ import numpy as np
 import torch.nn as nn
 from torch.autograd import Variable
 import torch.nn.functional as F
-import os,sys
-import skimage
-import skimage.io
-import skimage.transform
-from PIL import Image
-
-import argparse
-sys.path.append('projects/mmdet3d_plugin/occupancy/image2bev/LEAStereo/')
-from models.decoding_formulas import network_layer_to_space
-from build_model_2d import Disp
-from new_model_2d import newFeature
-from skip_model_3d import newMatching
-from collections import OrderedDict
+from .models.decoding_formulas import network_layer_to_space
+from .build_model_2d import Disp
+from .new_model_2d import newFeature
+from .skip_model_3d import newMatching
 
 
 def warp( x, calib, down, maxdepth ):

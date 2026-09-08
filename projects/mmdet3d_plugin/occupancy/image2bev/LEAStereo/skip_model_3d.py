@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from models.genotypes_3d import PRIMITIVES
-from models.genotypes_3d import Genotype
-from models.operations_3d import *
+from .models.genotypes_3d import PRIMITIVES
+from .models.genotypes_3d import Genotype
+from .models.operations_3d import *
 import torch.nn.functional as F
 import numpy as np
 import pdb
@@ -168,4 +168,3 @@ class newMatching(nn.Module):
         mat = self.last_3(upsample_6( mat ))  
       
         return mat  
-

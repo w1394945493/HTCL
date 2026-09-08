@@ -1,9 +1,9 @@
 import torch.nn as nn
 import torch.nn.functional as F
-import models.cell_level_search_2d as cell_level_search
-from models.genotypes_2d import PRIMITIVES
-from models.operations_2d import *
-from models.decoding_formulas import Decoder
+from .models import cell_level_search_2d as cell_level_search
+from .models.genotypes_2d import PRIMITIVES
+from .models.operations_2d import *
+from .models.decoding_formulas import Decoder
 import pdb
 
 class DispEntropy(nn.Module):
@@ -438,4 +438,3 @@ class AutoFeature(nn.Module):
     def genotype(self):
         decoder = Decoder(self.alphas_cell, self._block_multiplier, self._step)
         return decoder.genotype_decode()
-

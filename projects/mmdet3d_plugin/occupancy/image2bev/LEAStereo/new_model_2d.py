@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from models.genotypes_2d import PRIMITIVES
-from models.genotypes_2d import Genotype
-from models.operations_2d import *
+from .models.genotypes_2d import PRIMITIVES
+from .models.genotypes_2d import Genotype
+from .models.operations_2d import *
 import torch.nn.functional as F
 import numpy as np
 import pdb
@@ -175,4 +175,3 @@ class newFeature(nn.Module):
             else:
                 bn_params.append(param)
         return bn_params, non_bn_params
-

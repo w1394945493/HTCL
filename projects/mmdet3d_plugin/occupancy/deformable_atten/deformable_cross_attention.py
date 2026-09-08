@@ -25,7 +25,7 @@ from mmcv.runner import force_fp32, auto_fp16
 
 from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
 from mmcv.utils import ext_loader
-from multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32, \
+from .multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32, \
     MultiScaleDeformableAttnFunction_fp16
 # from projects.mmdet3d_plugin.models.utils.bricks import run_time
 # ext_module = ext_loader.load_ext(
