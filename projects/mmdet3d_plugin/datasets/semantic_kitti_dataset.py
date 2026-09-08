@@ -164,7 +164,19 @@ class CustomSemanticKITTIDataset(SemanticKITTIDataset):
             dict: Training data dict of the corresponding index.
         """
         queue = []
-        index_list = list(range(index-self.queue_length, index))
+
+        # 原始时序采样逻辑：随机丢弃一个候选历史帧，再按时间顺序加入当前帧。
+        # index_list = list(range(index-self.queue_length, index))
+        # random.shuffle(index_list)
+        # index_list = sorted(index_list[1:])
+        # index_list.append(index)
+
+        # 在保留原有随机采样功能的基础上，将越界或跨 sequence 的索引钳制到当前序列首帧。
+        sequence = self.data_infos[index]["sequence"]
+        sequence_start = max(0, index - self.queue_length)
+        while sequence_start < index and self.data_infos[sequence_start]["sequence"] != sequence:
+            sequence_start += 1
+        index_list = [max(sequence_start, i) for i in range(index - self.queue_length, index)]
         random.shuffle(index_list)
         index_list = sorted(index_list[1:])
         index_list.append(index)
