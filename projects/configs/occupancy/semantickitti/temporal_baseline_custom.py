@@ -30,7 +30,7 @@ voxel_x = (point_cloud_range[3] - point_cloud_range[0]) / occ_size[0]
 voxel_y = (point_cloud_range[4] - point_cloud_range[1]) / occ_size[1]
 voxel_z = (point_cloud_range[5] - point_cloud_range[2]) / occ_size[2]
 voxel_size = [voxel_x, voxel_y, voxel_z]
-queue_length = 4
+queue_length = 4 # * 时序长度设置
 
 data_config={
     'input_size': (384, 1280),

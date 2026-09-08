@@ -110,48 +110,50 @@ class CustomSemanticKITTIDataset(SemanticKITTIDataset):
         calib_out["P2"][:3, :4] = calib_all["P2"].reshape(3, 4)
         calib_out["P3"][:3, :4] = calib_all["P3"].reshape(3, 4)
         calib_out["Tr"] = np.identity(4)  # 4x4 matrix
-        calib_out["Tr"][:3, :4] = calib_all["Tr"].reshape(3, 4) 
+        calib_out["Tr"][:3, :4] = calib_all["Tr"].reshape(3, 4)
         return calib_out
 
-    def load_annotations(self, ann_file):
-        scans = []
-        for sequence in self.sequences:
-            calib = self.read_calib(
-                os.path.join(self.data_root, "dataset", "sequences", sequence, "calib.txt")
-            )
-            P2 = calib["P2"]
-            P3 = calib["P3"]
-            T_velo_2_cam = calib["Tr"]
-            proj_matrix_2 = P2 @ T_velo_2_cam
-            proj_matrix_3 = P3 @ T_velo_2_cam
+    def load_annotations(self, ann_file):  # 加载数据集标注索引；ann_file 参数由父类接口传入
+        scans = []  # 保存所有帧的路径、标定参数和标注路径
+        for sequence in self.sequences:  # 按训练、验证或测试划分逐个遍历序列
+            calib = self.read_calib(  # 读取当前序列的相机与激光雷达标定参数
+                os.path.join(self.data_root, "dataset", "sequences", sequence, "calib.txt")  # 拼接标定文件路径
+            )  # 完成当前序列标定文件的读取
+            P2 = calib["P2"]  # 获取左彩色相机 image_2 的投影矩阵
+            P3 = calib["P3"]  # 获取右彩色相机 image_3 的投影矩阵
+            T_velo_2_cam = calib["Tr"]  # 获取激光雷达坐标系到相机坐标系的变换矩阵
+            proj_matrix_2 = P2 @ T_velo_2_cam  # 计算激光雷达点到左图像平面的投影矩阵
+            proj_matrix_3 = P3 @ T_velo_2_cam  # 计算激光雷达点到右图像平面的投影矩阵
 
-            voxel_base_path = os.path.join(self.ann_file, sequence)
-            img_base_path = os.path.join(self.data_root, "dataset", "sequences", sequence)
-            id_base_path = os.path.join(self.data_root, "dataset", "sequences", sequence, 'voxels', '*.bin')
-            for id_path in glob.glob(id_base_path):
-                img_id = id_path.split("/")[-1].split(".")[0]
-                img_2_path = os.path.join(img_base_path, 'image_2', img_id + '.png')
-                img_3_path = os.path.join(img_base_path, 'image_3', img_id + '.png')
-                calib_path = os.path.join(img_base_path, 'calib.txt')
+            voxel_base_path = os.path.join(self.ann_file, sequence)  # 构造当前序列的体素标注目录
+            img_base_path = os.path.join(self.data_root, "dataset", "sequences", sequence)  # 构造当前序列的数据根目录
+            id_base_path = os.path.join(self.data_root, "dataset", "sequences", sequence, 'voxels', '*.bin')  # 构造用于检索所有帧号的通配路径
+            #! 确保每个squence内按帧号排序
+            # for id_path in glob.glob(id_base_path):  # 遍历匹配到的体素文件，并以其文件名确定帧号
+            for id_path in sorted(glob.glob(id_base_path), key=lambda path: int(os.path.splitext(os.path.basename(path))[0])):
+                img_id = id_path.split("/")[-1].split(".")[0]  # 从文件路径中提取不带扩展名的帧号
+                img_2_path = os.path.join(img_base_path, 'image_2', img_id + '.png')  # 构造当前帧左相机图像路径
+                img_3_path = os.path.join(img_base_path, 'image_3', img_id + '.png')  # 构造当前帧右相机图像路径
+                calib_path = os.path.join(img_base_path, 'calib.txt')  # 保存当前序列标定文件路径
 
-                voxel_path = os.path.join(voxel_base_path, img_id + '_1_1.npy')
-                if not os.path.exists(voxel_path):
-                    voxel_path = None
-                scans.append(
-                    {   "img_2_path": img_2_path,
-                        "img_3_path": img_3_path,
-                        "sequence": sequence,
-                        "frame_id": img_id,
-                        "P2": P2,
-                        "P3": P3,
-                        "T_velo_2_cam": T_velo_2_cam,
-                        "proj_matrix_2": proj_matrix_2,
-                        "proj_matrix_3": proj_matrix_3,
-                        "voxel_path": voxel_path,
-                        'calib_path': calib_path 
-                    }
-                )
-        return scans  # return to self.data_infos
+                voxel_path = os.path.join(voxel_base_path, img_id + '_1_1.npy')  # 构造当前帧的完整分辨率体素标签路径
+                if not os.path.exists(voxel_path):  # 检查当前帧的体素标签是否存在
+                    voxel_path = None  # 标签不存在时使用 None 标记该帧
+                scans.append(  # 将当前帧的数据索引信息加入样本列表
+                    {   "img_2_path": img_2_path,  # 左相机图像路径
+                        "img_3_path": img_3_path,  # 右相机图像路径
+                        "sequence": sequence,  # 当前帧所属的序列编号
+                        "frame_id": img_id,  # 当前帧的帧编号
+                        "P2": P2,  # 左相机投影矩阵
+                        "P3": P3,  # 右相机投影矩阵
+                        "T_velo_2_cam": T_velo_2_cam,  # 激光雷达到相机坐标系的变换矩阵
+                        "proj_matrix_2": proj_matrix_2,  # 激光雷达到左图像平面的投影矩阵
+                        "proj_matrix_3": proj_matrix_3,  # 激光雷达到右图像平面的投影矩阵
+                        "voxel_path": voxel_path,  # 当前帧体素语义标签路径
+                        'calib_path': calib_path  # 当前序列标定文件路径
+                    }  # 当前帧的数据索引字典
+                )  # 完成当前帧信息的追加
+        return scans  # 返回全部样本信息，父类会将其保存到 self.data_infos
 
     def prepare_train_data(self, index):
         """
@@ -211,14 +213,14 @@ class CustomSemanticKITTIDataset(SemanticKITTIDataset):
             cam_intrinsics = []
             for cam_type in self.camera_used:
                 image_paths.append(info['img_{}_path'.format(int(cam_type))])
-              
+
                 lidar2img_rts.append(info['proj_matrix_{}'.format(int(cam_type))])
                 cam_intrinsics.append(info['P{}'.format(int(cam_type))])
 
             input_dict.update(
                 dict(
                     img_filename=image_paths,
-                 
+
                     lidar2img=lidar2img_rts,
                     cam_intrinsic=cam_intrinsics,
                 ))
@@ -418,4 +420,3 @@ class SSCMetrics:
                 fn_sum[j] += fn
 
         return tp_sum, fp_sum, fn_sum
-
