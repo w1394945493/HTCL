@@ -112,4 +112,4 @@ class temporal_encoder(torch.nn.Module):
                                             invK=invK)                                   # (1 4 4) * 逆内参
             combined_waped_feature[:, temporal,:,:,:] = batch_waped_feature.squeeze(1)
 
-        return  curr_feature, combined_waped_feature
+        return  curr_feature, combined_waped_feature # (1 64 96 320) (1 3 112 96 320)

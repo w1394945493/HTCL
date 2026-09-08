@@ -352,17 +352,16 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
 
         (x, rots, trans, intrins, post_rots, post_trans, bda, mlp_input) = input[:8]
 
-        B, N, C, H, W = x.shape
+        B, N, C, H, W = x.shape # (1 240 48 160)
         x = x.view(B * N, C, H, W)
-
         calib = input[16]
 
         # *=============================================#
-        # * 1.概率深度分布估计
+        # * 1.体素特征体构建：lift -> splat 范式
         if  imgl.shape[1]>1:
             imgl, imgr = imgl[:, -1, ...], imgr[:, -1, ...] # (1 1 3 384 1280) # * 时序队列最后一帧的左右图像
         imgl, imgr = F.interpolate(imgl.squeeze(1), size=[288, 960], mode='bilinear', align_corners=True), F.interpolate(imgr.squeeze(1), size=[288, 960], mode='bilinear', align_corners=True) # (1 3 288 960)
-        # *=============================================#
+        # *---------------------------------------------#
         # * 1.1 双目深度估计：使用 LEAStereo 构建当前帧双目深度代价体
         stereo_volume = self.leamodel(imgl, imgr, calib )["classfy_volume"] # (1 1 64 96 320)
         stereo_volume = F.interpolate(stereo_volume, size=[ 112, H, W ], mode='trilinear', align_corners=True).squeeze(1) # (1 112 48 160)
@@ -370,20 +369,20 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
 
         if self.imgseg:
             self.forward_dic['imgseg_logits'] = self.img_seg_head(x)
-        # *=============================================#
+        # *---------------------------------------------#
         # * 1.2 单目深度估计：延续CGFormer工作，单目深度估计分支和上下文分支
         x = self.depth_net(x, mlp_input) 
         depth_digit = x[:, :self.D, ...] # (1 112 48 160)
         img_feat = x[:, self.D:self.D + self.numC_Trans, ...] # (1 128 48 160) # * 每个像素的上下文特征
         depth_prob = self.get_depth_dist(depth_digit) # (1 112 48 160) # * 每个像素的离散深度分布
-        # *=============================================#
+        # *---------------------------------------------#
         # * 1.3 融合双目深度代价体与 LSS 分支预测的深度分布
         depth_prob, auxility = self.volume_interaction(stereo_volume, depth_prob)
 
         if self.imgseg and self.lift_with_imgseg:
             img_segprob = torch.softmax(self.forward_dic['imgseg_logits'], dim=1)
             img_feat = torch.cat((img_feat, img_segprob), dim=1)
-        # *=============================================#
+        # *---------------------------------------------#
         # * 1.4 Lift：通过深度概率与图像上下文特征的外积构建视锥特征体
         volume = depth_prob.unsqueeze(1) * img_feat.unsqueeze(2) # (1 128 112 48 160)
         volume = volume.view(B, N, -1, self.D, H, W) # (1 1 128 112 48 160)
@@ -395,10 +394,12 @@ class ViewTransformerLiftSplatShootVoxel(ViewTransformerLSSBEVDepth):
         # *=============================================#
         # * 2. 对齐时序体构建 Aligned Temporal Volume Construction ：将历史帧特征对齐到当前参考帧
         img_left_ref, img_left_sour = left_input[:, -1, ...].unsqueeze(1).permute(0,1,4,2,3).cuda(), left_input[:,:-1, ...].permute(0,1,4,2,3).cuda()  # (1 1 3 384 1280) (1 3 3 384 1280)
-        curr_feature, batch_waped_feature = self.temporal_encoder( ref_images=img_left_ref, source_images=img_left_sour, intrinsics=intrins ) #
-
-        curr_feature = F.interpolate(curr_feature, size=[H, W], mode='bilinear', align_corners=True)
-        batch_waped_feature = F.interpolate(batch_waped_feature, size=[self.D, H, W], mode='trilinear', align_corners=True)
+        curr_feature, batch_waped_feature = self.temporal_encoder( ref_images=img_left_ref, source_images=img_left_sour, intrinsics=intrins ) # (1 64 96 320) (1 3 112 96 320)
+        
+        # *=============================================#
+        # * 3. 
+        curr_feature = F.interpolate(curr_feature, size=[H, W], mode='bilinear', align_corners=True) # (1 64 96 320)->(1 64 48 160)
+        batch_waped_feature = F.interpolate(batch_waped_feature, size=[self.D, H, W], mode='trilinear', align_corners=True) # (1 3 112 48 160)
         # * ADR：使用多级可变形卷积动态细化历史特征的采样位置
         defomable_batch_waped_feature = self.temporal_deformable(batch_waped_feature)
         # * CPA：提取当前帧与对齐历史帧的多尺度局部 pattern

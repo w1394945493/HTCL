@@ -71,12 +71,7 @@ class ResnetEncoderMatching(nn.Module):
 
         # buffer 不参与梯度更新，并会随模型自动迁移设备；persistent=False 避免增加 checkpoint 体积
         self.register_buffer("depth_bins", depth_bins, persistent=False)
-        self.register_buffer(
-            "warp_depths",
-            depth_bins[:, None, None, None].expand(
-                -1, 1, self.matching_height, self.matching_width),
-            persistent=False,
-        )
+        self.register_buffer("warp_depths", depth_bins[:, None, None, None].expand(-1, 1, self.matching_height, self.matching_width), persistent=False)
 
     #! 注释的原代码
     # def compute_depth_bins(self, min_depth_bin, max_depth_bin):
@@ -114,14 +109,14 @@ class ResnetEncoderMatching(nn.Module):
 
         # with torch.no_grad():  # 原代码曾考虑关闭 warp 分支梯度，当前保留梯度以参与反向传播
         for batch_idx in range(len(current_feats)):  # 逐个处理 batch 样本；current_feats 在此仅用于取得 B
-            _lookup_feats = lookup_feats[batch_idx:batch_idx + 1]  # 当前样本的历史特征：(1, T, C, h, w)
-            _lookup_poses = relative_poses[batch_idx:batch_idx + 1]  # 当前样本各历史帧的相对位姿：(1, T, 4, 4)
+            _lookup_feats = lookup_feats[batch_idx:batch_idx + 1]  # (1 1 64 96 320) # 当前样本的历史特征：(1, T, C, h, w)
+            _lookup_poses = relative_poses[batch_idx:batch_idx + 1]  # (1 1 4 4) # 当前样本各历史帧的相对位姿：(1, T, 4, 4)
 
             _K = K[batch_idx:batch_idx + 1]  # 当前样本在特征图尺度下的相机内参：(1, 4, 4)
             _invK = invK[batch_idx:batch_idx + 1]  # 当前样本的逆内参，用于像素反投影：(1, 4, 4)
 
-            world_points = self.backprojector(  # 将当前视角的像素按 D 个深度假设反投影为齐次三维点
-                self.warp_depths, _invK)
+            # 将当前视角的像素按 D 个深度假设反投影为齐次三维点
+            world_points = self.backprojector(self.warp_depths, _invK) # (112 4 30720)
 
             waped_feature = []  # 保存当前 batch 样本中每张历史帧的对齐结果
             for lookup_idx in range(_lookup_feats.shape[1]):  # 逐张处理当前样本包含的历史帧
@@ -130,30 +125,28 @@ class ResnetEncoderMatching(nn.Module):
 
                 if lookup_pose.sum() == 0:  # 全零位姿表示对应历史帧缺失
                     continue  # 跳过缺失帧，不执行投影和特征采样
-
-                lookup_feat = lookup_feat.repeat(  # 为每个深度假设复制一份历史帧特征
-                    [self.num_depth_bins, 1, 1, 1])  # (1, C, h, w) → (D, C, h, w)
-                pix_locs = self.projector(  # 将三维假设点变换并投影到历史帧特征图
-                    world_points, _K, lookup_pose)  # 输出 grid_sample 所需的坐标：(D, h, w, 2)
+                # 为每个深度假设复制一份历史帧特征
+                lookup_feat = lookup_feat.repeat([self.num_depth_bins, 1, 1, 1]) # (112 64 96 320) # (1, C, h, w) → (D, C, h, w)
+                # 将三维假设点变换并投影到历史帧特征图
+                pix_locs = self.projector(world_points, _K, lookup_pose)  # (112 96 320 2) # 输出 grid_sample 所需的坐标：(D, h, w, 2)
                 warped = F.grid_sample(  # 根据投影坐标从历史帧特征图进行可微双线性采样
                     lookup_feat,
                     pix_locs,
                     padding_mode='zeros',  # 投影到特征图范围外的位置使用零填充
                     mode='bilinear',  # 对非整数采样位置执行双线性插值
                     align_corners=True,
-                )  # 得到 D 个深度假设下的历史帧对齐特征：(D, C, h, w)
+                ) # (112 64 96 320) # 得到 D 个深度假设下的历史帧对齐特征：(D, C, h, w)
                 waped_feature.append(warped)  # 保存当前历史帧的对齐特征
-
-            waped_feature = torch.stack(  # 将所有有效历史帧的对齐结果堆叠到时间维
-                waped_feature, dim=0)  # 形状为 (T, D, C, h, w)；当前调用中 T=1
+            
+            # 将所有有效历史帧的对齐结果堆叠到时间维
+            waped_feature = torch.stack(waped_feature, dim=0) # (1 112 64 96 320) # 形状为 (T, D, C, h, w)；当前调用中 T=1
             batch_waped_feature.append(waped_feature)  # 保存当前 batch 样本的对齐结果
 
-        batch_waped_feature = torch.stack(  # 将所有 batch 样本的结果堆叠起来
-            batch_waped_feature, dim=0)  # 形状为 (B, T, D, C, h, w)
-
-        batch_waped_feature = batch_waped_feature.squeeze(1).permute(  # 移除 T=1 的维度并交换 C、D
-            0, 2, 1, 3, 4)  # (B, 1, D, C, h, w) → (B, C, D, h, w)
-        batch_waped_feature = batch_waped_feature.mean(1)  # 沿特征通道求均值：(B, C, D, h, w) → (B, D, h, w)
+        # 将所有 batch 样本的结果堆叠起来
+        batch_waped_feature = torch.stack(batch_waped_feature, dim=0) # (1 1 112 64 96 320) # 形状为 (B, T, D, C, h, w)
+        # 移除 T=1 的维度并交换 C、D
+        batch_waped_feature = batch_waped_feature.squeeze(1).permute(0, 2, 1, 3, 4) # (1 64 112 96 320) # (B, 1, D, C, h, w) → (B, C, D, h, w)
+        batch_waped_feature = batch_waped_feature.mean(1) # (1 112 96 320) # 沿特征通道求均值：(B, C, D, h, w) → (B, D, h, w)
 
         return batch_waped_feature  # 返回以深度假设为通道的历史帧对齐特征体
 
@@ -225,7 +218,7 @@ class ResnetEncoderMatching(nn.Module):
             invK,  # (1 4 4) # 相机内参伪逆，用于将二维像素反投影到三维空间
         )
 
-        return current_feats, batch_waped_feature  # 返回当前帧特征及对齐后的历史时序特征体
+        return current_feats, batch_waped_feature # (1 64 96 320) # (1 112 96 320) 返回当前帧特征及对齐后的历史时序特征体
 
     # def cuda(self):
     #     super().cuda()
