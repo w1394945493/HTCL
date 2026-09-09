@@ -30,7 +30,7 @@ PYTHONPATH="$(pwd)" \
 python /vepfs-mlp2/c20250502/haoce/wangyushen/HTCL/tools/test.py \
   /vepfs-mlp2/c20250502/haoce/wangyushen/HTCL/projects/configs/occupancy/semantickitti/temporal_baseline_custom.py \
   /c20250502/wangyushen/Weights/htcl/pretrain.pth \
-  --out /vepfs-mlp2/c20250502/haoce/wangyushen/Outputs/htcl/val/ \
+  --metrics-out /vepfs-mlp2/c20250502/haoce/wangyushen/Outputs/htcl/val/pretrain_metrics.json \
   --eval mAP
 
 # * 多卡训练
@@ -46,11 +46,12 @@ export CUDA_VISIBLE_DEVICES=0,1
 PYTHONPATH="$(pwd):${PYTHONPATH:-}" \
 torchrun --nproc_per_node=2 \
     tools/test.py \
-    projects/configs/occupancy/semantickitti/temporal_baseline_custom.py\
+    projects/configs/occupancy/semantickitti/temporal_baseline_custom.py \
     /c20250502/wangyushen/Outputs/htcl/htcl/semkitti/train/epoch_1.pth \
     --launcher pytorch \
     --deterministic \
     --tmpdir /vepfs-mlp2/c20250502/haoce/wangyushen/Outputs/htcl/val/.dist_test \
+    --metrics-out /vepfs-mlp2/c20250502/haoce/wangyushen/Outputs/htcl/val/epoch_1_metrics.json \
     --eval mAP
 
 # 火山服务器
@@ -59,5 +60,9 @@ cd /vepfs-mlp2/c20250502/haoce/wangyushen/HTCL
 conda activate /vepfs-mlp2/c20250502/haoce/conda_env/wys_temp_2
 bash sh/train_htcl.sh
 
-
+# 火山服务器
+cd /vepfs-mlp2/c20250502/haoce/wangyushen/HTCL
+. /root/miniconda3/bin/activate
+conda activate /vepfs-mlp2/c20250502/haoce/conda_env/wys_temp_2
+bash sh/val_htcl.sh
 

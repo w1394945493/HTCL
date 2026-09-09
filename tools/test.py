@@ -2,8 +2,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 import argparse
+import json
 import mmcv
 import os
+from pathlib import Path
 import torch
 import warnings
 from mmcv import Config, DictAction
@@ -24,12 +26,31 @@ sys.path.append('..')
 from projects.mmdet3d_plugin.occupancy.apis.test import custom_single_gpu_test, custom_multi_gpu_test
 from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 
+
+def make_json_serializable(value):
+    """将评估结果中的 Tensor/NumPy 类型递归转换为 JSON 原生类型。"""
+    if isinstance(value, dict):
+        return {key: make_json_serializable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [make_json_serializable(item) for item in value]
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().item() if value.numel() == 1 else value.detach().cpu().tolist()
+    if hasattr(value, 'tolist'):
+        return value.tolist()
+    if hasattr(value, 'item'):
+        return value.item()
+    return value
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description='MMDet test (and eval) a model')
     parser.add_argument('config', default=None, help='test config file path')
     parser.add_argument('checkpoint', default=None, help='checkpoint file')
     parser.add_argument('--out', help='output result file in pickle format')
+    parser.add_argument(
+        '--metrics-out',
+        help='JSON file used to save IoU, mIoU and per-class IoU metrics')
     parser.add_argument(
         '--fuse-conv-bn',
         action='store_true',
@@ -115,11 +136,12 @@ def parse_args():
 def main():
     args = parse_args()
 
-    assert args.out or args.eval or args.format_only or args.show \
+    assert args.out or args.metrics_out or args.eval or args.format_only or args.show \
         or args.show_dir, \
         ('Please specify at least one operation (save/eval/format/show the '
-         'results / save the results) with the argument "--out", "--eval"'
-         ', "--format-only", "--show" or "--show-dir"')
+         'results / save the results) with the argument "--out", '
+         '"--metrics-out", "--eval", "--format-only", "--show" or '
+         '"--show-dir"')
 
     if args.eval and args.format_only:
         raise ValueError('--eval and --format_only cannot be both specified')
@@ -271,7 +293,21 @@ def main():
                 eval_kwargs.pop(key, None)
             eval_kwargs.update(dict(metric=args.eval, **kwargs))
 
-            print(dataset.evaluate(outputs, **eval_kwargs))
+            eval_results = dataset.evaluate(outputs, **eval_kwargs)
+            print(eval_results)
+
+            # * 仅由 rank 0 将 IoU、mIoU 和各类别 IoU 写入指定 JSON 文件
+            if args.metrics_out:
+                metrics_path = Path(args.metrics_out)
+                metrics_path.parent.mkdir(parents=True, exist_ok=True)
+                with metrics_path.open('w', encoding='utf-8') as file:
+                    json.dump(
+                        make_json_serializable(eval_results),
+                        file,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                print(f'Evaluation metrics saved to {metrics_path}')
 
 if __name__ == '__main__':
     main()
