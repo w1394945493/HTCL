@@ -37,7 +37,7 @@ def custom_train_detector(model,
     logger = get_root_logger(cfg.log_level)
 
     # prepare data loaders
-   
+
     dataset = dataset if isinstance(dataset, (list, tuple)) else [dataset]
     #assert len(dataset)==1s
     if 'imgs_per_gpu' in cfg.data:
@@ -78,12 +78,17 @@ def custom_train_detector(model,
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False,
             find_unused_parameters=find_unused_parameters)
+        if not hasattr(model, '_use_replicated_tensor_module'):
+            model._use_replicated_tensor_module = False
+
         if eval_model is not None:
             eval_model = MMDistributedDataParallel(
                 eval_model.cuda(),
                 device_ids=[torch.cuda.current_device()],
                 broadcast_buffers=False,
                 find_unused_parameters=find_unused_parameters)
+            if not hasattr(eval_model, '_use_replicated_tensor_module'):
+                eval_model._use_replicated_tensor_module = False
     else:
         model = MMDataParallel(
             model.cuda(cfg.gpu_ids[0]), device_ids=cfg.gpu_ids)
@@ -142,12 +147,12 @@ def custom_train_detector(model,
     runner.register_training_hooks(cfg.lr_config, optimizer_config,
                                    cfg.checkpoint_config, cfg.log_config,
                                    cfg.get('momentum_config', None))
-    
+
     # register profiler hook
     #trace_config = dict(type='tb_trace', dir_name='work_dir')
     #profiler_config = dict(on_trace_ready=trace_config)
     #runner.register_profiler_hook(profiler_config)
-    
+
     if distributed:
         if isinstance(runner, EpochBasedRunner):
             runner.register_hook(DistSamplerSeedHook())

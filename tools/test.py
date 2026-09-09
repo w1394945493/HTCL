@@ -59,6 +59,10 @@ def parse_args():
         '--tmpdir',
         help='tmp directory used for collecting results from multiple '
         'workers, available when gpu-collect is not specified')
+    parser.add_argument(
+        '--test-save',
+        help='directory used to save SemanticKITTI submission files; '
+        'omit it when computing validation metrics')
     parser.add_argument('--seed', type=int, default=0, help='random seed')
     parser.add_argument(
         '--deterministic',
@@ -92,7 +96,8 @@ def parse_args():
         choices=['none', 'pytorch', 'slurm', 'mpi'],
         default='none',
         help='job launcher')
-    parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument(
+        '--local_rank', '--local-rank', dest='local_rank', type=int, default=0)
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
@@ -195,7 +200,7 @@ def main():
         samples_per_gpu=samples_per_gpu,
         workers_per_gpu=cfg.data.workers_per_gpu,
         dist=distributed,
-        shuffle=True,
+        shuffle=False,
         #nonshuffler_sampler=cfg.data.nonshuffler_sampler,
         # shuffler_sampler=cfg.data.shuffler_sampler,
     )
@@ -231,10 +236,14 @@ def main():
             model.cuda(),
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False)
+        # * 兼容 PyTorch 2.x：旧版 MMCV 会访问已移除的 DDP 内部属性
+        if not hasattr(model, '_use_replicated_tensor_module'):
+            model._use_replicated_tensor_module = False
         # outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir,
         #                                 args.gpu_collect)
         outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir,
-                                        args.gpu_collect, test_save = './test_save')
+                                        args.gpu_collect,
+                                        test_save=args.test_save)
         
 
     rank, _ = get_dist_info()

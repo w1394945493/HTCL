@@ -16,7 +16,7 @@ python setup.py build_ext --inplace
 python scripts/extract_posenet_weights.py \
     /c20250502/wangyushen/Weights/htcl/pretrain.pth \
     /c20250502/wangyushen/Weights/htcl/posenet.pth
-  
+
 # PYTHONPATH="$(pwd)"：会直接覆盖原来的 PYTHONPATH，最终只包含当前目录。
 # PYTHONPATH="$(pwd):${PYTHONPATH}"：是在原有路径前面添加当前目录
 # * semkitti训练
@@ -38,15 +38,26 @@ export CUDA_VISIBLE_DEVICES=0,1
 PYTHONPATH="$(pwd):${PYTHONPATH:-}" \
 torchrun --nproc_per_node=2 tools/train.py \
     projects/configs/occupancy/semantickitti/temporal_baseline_custom.py \
-    --launcher pytorch \ 
+    --launcher pytorch \
     --work-dir /vepfs-mlp2/c20250502/haoce/wangyushen/Outputs/htcl/train
+
+# * 多卡评估
+export CUDA_VISIBLE_DEVICES=0,1
+PYTHONPATH="$(pwd):${PYTHONPATH:-}" \
+torchrun --nproc_per_node=2 \
+    tools/test.py \
+    projects/configs/occupancy/semantickitti/temporal_baseline_custom.py\
+    /vepfs-mlp2/c20250502/haoce/wangyushen/Outputs/htcl/train/epoch_1.pth \
+    --launcher pytorch \
+    --deterministic \
+    --tmpdir /vepfs-mlp2/c20250502/haoce/wangyushen/Outputs/htcl/val/.dist_test \
+    --eval mAP
 
 # 火山服务器
 cd /vepfs-mlp2/c20250502/haoce/wangyushen/HTCL
 . /root/miniconda3/bin/activate
 conda activate /vepfs-mlp2/c20250502/haoce/conda_env/wys_temp_2
 bash sh/train_htcl.sh
-
 
 
 
