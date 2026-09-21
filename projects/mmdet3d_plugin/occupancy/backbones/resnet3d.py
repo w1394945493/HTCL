@@ -217,33 +217,41 @@ class CustomResNet3D(BaseModule):
         return loss_rel_ce
 
     def forward(self, x):  
+        # *==============================================#
+        # * 5.1.1 输入投影：将主分支体素映射到三维主干的起始通道数
+        # 输入按 [B,C,X,Y,Z] 排列；以下 shape 对应 temporal_baseline_custom.py，不是所有配置的固定尺寸
+        # input_proj 为 1x1x1 Conv3d + 归一化 + ReLU，改变特征表示但不下采样空间网格
+        # 当前输入/输出均为 [B,128,128,128,16]；通道数相同仍会经过可学习的通道混合
         x = self.input_proj(x)
         res = []
+        # *----------------------------------------------#
+        # * 5.1.2 逐级执行三维残差编码，提取多尺度空间上下文
+        # 当前 depth=18、num_stage=3，每级包含两个 BasicBlock；三级步长分别为 1、2、2
+        # stage 0：[B,128,128,128,16] -> [B,128,128,128,16]
+        # stage 1：[B,128,128,128,16] -> [B,256,64,64,8]
+        # stage 2：[B,256,64,64,8] -> [B,512,32,32,4]
+        # 后级增加通道并降低 XYZ 分辨率，以聚合更大范围的上下文；此处尚未融合 temporal_voxel
         for index, layer in enumerate(self.layers):
             x = layer(x)
-            
-            '''
-            when LSS generates /2 volumes, the following stages generate:
-            0 torch.Size([2, 80, 128, 128, 16])
-            1 torch.Size([2, 160, 64, 64, 8])
-            2 torch.Size([2, 320, 32, 32, 4])
-            3 torch.Size([2, 640, 16, 16, 2])
-            '''
-            
-            '''
-            Parameter at index 708 with name img_backbone.layers.5.16.linear_conv.bn.weight has been marked as ready twice. 
-            This means that multiple autograd engine  hooks have fired for this particular parameter during this iteration.
-            '''
-            
-            if self.crp3d and (self.crp_level == index):  ### False
+
+            # *----------------------------------------------#
+            # * 5.1.3 可选 CRP 分支：在指定层级建模三维上下文关系
+            # 当前配置使用默认 crp3d=False，不执行此分支；启用时更新特征并保存关系预测供外部损失使用
+            if self.crp3d and (self.crp_level == index):
                 outputs = self.CP_mega_voxels(x)
                 self.forward_dic['crp_logits'] = outputs['P_logits']
                 x = outputs['x']
-            
+
+            # *----------------------------------------------#
+            # * 5.1.4 收集需要输出的层级特征
+            # 当前 out_indices=(0,1,2)，保留全部三级输出；res 是列表，不在这里拼接或统一分辨率
             if index in self.out_indices:
                 res.append(x)
-       
-        return res ## [4, 128, 128, 128, 16] [4, 256, 64, 64, 8] [4, 512, 32, 32, 4]
+
+        # *----------------------------------------------#
+        # * 5.1.5 返回多尺度特征列表，交给 SECONDFPN3D 进行上采样、拼接和时序融合
+        # res[0]=[B,128,128,128,16]，res[1]=[B,256,64,64,8]，res[2]=[B,512,32,32,4]
+        return res
 
 # def generate_model(model_depth, **kwargs):
 #     assert model_depth in [10, 18, 34, 50, 101, 152, 200]

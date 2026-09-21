@@ -53,8 +53,10 @@ class ResnetEncoderMatching(nn.Module):
                                    width=self.matching_width)
 
         # *====================================================#
-        # * 新增代码
+        # * 4.7.5.1 初始化固定深度假设与反投影所需的深度平面
         # HTCL 使用固定深度范围，因此在初始化时生成一次深度假设，避免每次 forward 重复计算
+        # 当前调用使用 linear、min=0、max=112、D=112；linspace 包含两端点，不是主分支的 0.5 米步长
+        # depth_bins=[D] 保存候选深度值；warp_depths=[D,1,h,w] 将每个候选值铺成常深度平面
         if self.depth_binning == 'linear':  # 在深度空间中均匀采样
             depth_bins = torch.linspace(
                 min_depth_bin, max_depth_bin, steps=self.num_depth_bins,
@@ -73,7 +75,7 @@ class ResnetEncoderMatching(nn.Module):
         self.register_buffer("depth_bins", depth_bins, persistent=False)
         self.register_buffer("warp_depths", depth_bins[:, None, None, None].expand(-1, 1, self.matching_height, self.matching_width), persistent=False)
 
-    #! 注释的原代码
+    # 保留的旧版深度分箱实现，当前不执行
     # def compute_depth_bins(self, min_depth_bin, max_depth_bin):
     #     """Compute the depths bins used to build the cost volume. Bins will depend upon
     #     self.depth_binning, to either be linear in depth (linear) or linear in inverse depth
@@ -105,6 +107,10 @@ class ResnetEncoderMatching(nn.Module):
         确定 batch 大小。外层目前每次只传入一张历史帧，因此历史帧维度 T 为 1。
         """
 
+        # *==============================================#
+        # * 4.7.5.4 几何对齐入口：逐样本读取历史特征、相对位姿与内参
+        # 由下方 forward() 调用；当前外层每次仅传一张历史图，此处 T=1，而非完整队列的历史帧数 3
+        # current_feats 在本方法中仅用于取得 B，不参与特征差值或相似度计算
         batch_waped_feature = []  # 保存 batch 中每个样本经过几何对齐后的历史特征体
 
         # with torch.no_grad():  # 原代码曾考虑关闭 warp 分支梯度，当前保留梯度以参与反向传播
@@ -115,10 +121,16 @@ class ResnetEncoderMatching(nn.Module):
             _K = K[batch_idx:batch_idx + 1]  # 当前样本在特征图尺度下的相机内参：(1, 4, 4)
             _invK = invK[batch_idx:batch_idx + 1]  # 当前样本的逆内参，用于像素反投影：(1, 4, 4)
 
-            # * 反投影, 对应论文公式(3)
-            # 将当前视角的像素按 D 个深度假设反投影为齐次三维点
+            # *----------------------------------------------#
+            # * 4.7.5.5 将当前像素按 D 个候选深度反投影为三维点
+            # BackprojectDepth.forward() 定义于本文件；利用 invK 将像素转换为射线，再乘候选深度
+            # world_points=[D,4,h*w] 是当前相机坐标系中的齐次点，变量名不表示已经转到世界坐标系
             world_points = self.backprojector(self.warp_depths, _invK) # (112 4 30720)
 
+            # *----------------------------------------------#
+            # * 4.7.5.6 投影到历史图像，并按深度假设反向采样历史特征
+            # Project3D.forward() 定义于本文件：应用相对位姿和 K，得到 grid_sample 所需的归一化坐标
+            # 输出仍以当前帧像素网格排列，但每个位置的值来自历史图；不同候选深度对应不同采样位置
             waped_feature = []  # 保存当前 batch 样本中每张历史帧的对齐结果
             for lookup_idx in range(_lookup_feats.shape[1]):  # 逐张处理当前样本包含的历史帧
                 lookup_feat = _lookup_feats[:, lookup_idx]  # 取一张历史帧特征：(1, C, h, w)
@@ -143,6 +155,10 @@ class ResnetEncoderMatching(nn.Module):
             waped_feature = torch.stack(waped_feature, dim=0) # (1 112 64 96 320) # 形状为 (T, D, C, h, w)；当前调用中 T=1
             batch_waped_feature.append(waped_feature)  # 保存当前 batch 样本的对齐结果
 
+        # *==============================================#
+        # * 4.7.5.7 堆叠对齐结果，并沿 64 个特征通道取均值
+        # 当前实现要求 T=1，先得到 [B,1,D,64,h,w]，再移除单历史帧维并聚合特征通道
+        # 输出 [B,D,h,w]：D 维索引候选深度，元素值为采样特征的均值，不是深度值或归一化概率
         # 将所有 batch 样本的结果堆叠起来
         batch_waped_feature = torch.stack(batch_waped_feature, dim=0) # (1 1 112 64 96 320) # 形状为 (B, T, D, C, h, w)
         # 移除 T=1 的维度并交换 C、D
@@ -154,6 +170,8 @@ class ResnetEncoderMatching(nn.Module):
     def feature_extraction(self, image, return_all_feats=False):
         """ Run feature extraction on an image - first 2 blocks of ResNet"""
 
+        # 步骤 4.7.5.2/4.7.5.3 共用此编码器；它与估计位姿所用的 PoseNet 编码器参数独立
+        # 输入已除以 255；此处进一步标准化，layer0 下采样到 1/2，layer1 输出 1/4 尺度的 64 通道特征
         image = (image - 0.45) / 0.225  # imagenet normalisation
         feats_0 = self.layer0(image)
         feats_1 = self.layer1(feats_0)
@@ -181,24 +199,28 @@ class ResnetEncoderMatching(nn.Module):
 
     def forward(self, current_image, lookup_images, poses, K, invK,
                 min_depth_bin=0, max_depth_bin=112):  # 提取当前帧和历史帧特征，并构建对齐时序特征体
-        # * (2) 生成当前帧特征图以及历史帧特征图集合：current_features 和 lookup_feats
-        # * 提取当前帧特征
+        # *==============================================#
+        # * 4.7.5.2 前向入口：提取当前参考帧的二维特征
+        # 初始化阶段已完成 4.7.5.1；本次调用由 temporal_encoder.forward() 发起
+        # current_image=[B,3,384,1280]，lookup_images=[B,1,3,384,1280]，poses=[B,1,4,4]
+        # 当前 forward 的 min_depth_bin/max_depth_bin 不参与计算，实际采样使用初始化时注册的 buffer
         # 使用共享的 ResNet 编码器提取当前帧多尺度特征
         # self.features = self.feature_extraction(current_image, return_all_feats=True)  # 返回所有尺度的特征，供当前分支及后续网络使用
         # current_feats = self.features[-1]  # 取最后一级特征作为帧间几何匹配的当前帧特征
         current_feats = self.feature_extraction(current_image, return_all_feats=False) # (1 64 96 320)
 
-        # * 整理历史帧输入并生成用于几何匹配的深度假设平面
-        #! 注释的原代码
+        # *----------------------------------------------#
+        # * 4.7.5.3 提取历史帧特征，并恢复 batch 与历史帧维度
+        # 保留的旧版动态分箱和形状整理代码，当前不执行
         # with torch.no_grad():  # 本代码块仅包含深度分箱和形状变换，不构建对应的计算图
         #     if self.adaptive_bins:  # 启用自适应深度分箱时，为本次前向传播重新生成深度采样值
-        #         # * 生成固定深度假设，不是需要学习的网络输出
+        #         # 生成固定深度假设，不是需要学习的网络输出
         #         self.compute_depth_bins(min_depth_bin, max_depth_bin) # 在指定深度范围内生成 num_depth_bins 个深度假设平面
         #     batch_size, num_frames, chns, height, width = lookup_images.shape  # 解析历史图像形状：(B, T, C, H, W)
         #     # 合并 batch 维和时间维，以便一次送入二维图像编码器
         #     lookup_images = lookup_images.reshape(batch_size * num_frames, chns, height, width)  # (B, T, C, H, W) → (B×T, C, H, W)
 
-        # * 新增代码
+        # 当前执行的形状整理逻辑；深度平面已在初始化时生成
         batch_size, num_frames, chns, height, width = lookup_images.shape  # 解析历史图像形状：(B, T, C, H, W)
         # 合并 batch 维和时间维，以便批量提取历史帧特征
         lookup_images = lookup_images.reshape(batch_size * num_frames, chns, height, width)  # (B, T, C, H, W) → (B×T, C, H, W)
@@ -209,17 +231,19 @@ class ResnetEncoderMatching(nn.Module):
         # 恢复历史帧的 batch 维和时间维
         lookup_feats = lookup_feats.reshape(batch_size, num_frames, chns, height, width)  # (1 1 64 96 320) # (B×T, C, h, w) → (B, T, C, h, w)
 
-        # *==============================================================#
-        # * 基于相对位姿、相机内参和多深度假设，将历史特征反向采样到当前帧视角
-        # * (3) 利用相对相机位姿和一组候选深度假设平面，通过单应性变换构建经过变换的历史帧特征
+        # 调用上方 match_features()，执行步骤 4.7.5.4 至 4.7.5.7：反投影、历史图采样和通道聚合
         batch_waped_feature = self.match_features(  # 对历史特征执行几何 warp，构建对齐后的时序特征体
-            current_feats,  # (1 64 96 320) # 当前帧特征，用于确定 batch 和目标视角
+            current_feats,  # (1 64 96 320)，在 match_features 中仅用于确定 batch 大小
             lookup_feats, # (1 1 64 96 320) # 尚未对齐的历史帧特征
             poses,  # (1 1 4 4) # 当前帧与各历史帧之间的相对位姿
             K,  # (1 4 4) # 特征图尺度下的相机内参矩阵
             invK,  # (1 4 4) # 相机内参伪逆，用于将二维像素反投影到三维空间
         )
 
+        # *==============================================#
+        # * 4.7.5.8 返回当前帧二维特征与单张历史帧的对齐特征体
+        # current_feats=[B,64,h,w] 保留特征通道；batch_waped_feature=[B,D,h,w] 保留深度假设维
+        # 外层 temporal_encoder 继续按历史帧堆叠，最终得到 [B,3,112,96,320]，此处尚未融合历史帧
         return current_feats, batch_waped_feature # (1 64 96 320) # (1 112 96 320) 返回当前帧特征及对齐后的历史时序特征体
 
     # def cuda(self):

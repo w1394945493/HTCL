@@ -80,12 +80,20 @@ class temporal_encoder(torch.nn.Module):
     #     return K , invK
 
     def forward(self, ref_images, source_images, intrinsics, calib=None ):
+        # *==============================================#
+        # * 4.7.1 准备参考帧、历史帧与时序输出容器
+        # ref 是 reference，当前帧提供对齐基准；source 是历史来源帧，提供待采样的特征
+        # 此处 T 仅表示历史帧数，当前为 3；与外部包含当前帧的队列长度 4 不同
+        # self.maxdisp 在此表示深度假设数 D=112，不是输出视差值；calib 参数在本函数中未使用
         B, T, C, H, W = source_images.shape # (1 3 3 384 1280) 历史帧图像(前三帧)
         combined_waped_feature = torch.zeros( B, T, self.maxdisp, H//4, W//4 ).cuda() # (1 3 112 96 320)
 
         height, width = ref_images.shape[-2: ] # 384 1280 当前帧图像
 
-        # 注释原代码
+        # *==============================================#
+        # * 4.7.2 准备特征图尺度的相机内参与逆内参
+        # 下方缩放以输入为归一化内参为前提；K 用于投影，invK 用于从当前像素反投影
+        # 保留的旧实现：通过 NumPy 逐样本处理内参，当前不执行
         # intrinsics =  intrinsics.squeeze(1).cpu().detach().numpy() # (1 4 4)
         # K, invK = torch.zeros_like( torch.tensor(intrinsics)).cuda() , torch.zeros_like( torch.tensor(intrinsics)).cuda() # (1 4 4) (1 4 4)
         # for batch in range( 0, B ):
@@ -95,14 +103,15 @@ class temporal_encoder(torch.nn.Module):
         #     K[batch], invK[batch] = K_, invK_
 
         # 使用纯 PyTorch 批量处理内参，避免 GPU→CPU→NumPy→GPU 的数据搬运和逐样本循环
-        # 去除相机维度并切断无须保留的内参梯度 # 与原先 torch.Tensor(...) 的数据类型保持一致，并满足 pinv 的计算要求
+        # 去除相机维度，切断内参梯度，并转为 float32 以满足 pinv 的计算要求
         K = intrinsics.squeeze(1).detach().to(device=ref_images.device, dtype=torch.float32).clone()  # 创建独立副本，避免下方原地缩放修改输入 intrinsics
         K[:, 0, :] *= width // 4  # 将归一化内参的水平方向参数缩放到 1/4 尺度特征图
         K[:, 1, :] *= height // 4  # 将归一化内参的垂直方向参数缩放到 1/4 尺度特征图
         invK = torch.linalg.pinv(K)  # 批量计算每个样本的内参伪逆，用于几何反投影
 
         # *==============================================#
-        # * 对应论文第 3.2 节：将当前帧分别与每个历史帧组成图像对
+        # * 4.7.3 逐张遍历历史帧，组成“历史帧 + 当前帧”图像对
+        # 每对图像分别除以 255 归一化；下面的位姿估计、特征对齐与结果写入对每张历史图执行一次
         ref_image = ref_images.squeeze(1) # (1 3 384 1280)
         for temporal in range(0, T): # T:3
             source_image = source_images[:, temporal, ...] # (1 3 384 1280)
@@ -110,8 +119,8 @@ class temporal_encoder(torch.nn.Module):
             source_image, _ = self.load_and_preprocess_image(source_image )
 
             # *===========================================#
-            # * 使用 PoseNet 根据当前图像与历史图像估计相对位姿；相机内参用于后续几何 warp
-            # * (1) 将当前帧和历史帧输入轻量级 PoseNet，以估计用于光度重投影的相对相机位姿；
+            # * 4.7.4 使用冻结的 PoseNet 估计当前帧与该历史帧的相对位姿
+            # 图像对 -> 位姿编码器 -> 旋转轴角与平移 -> [B,4,4] 变换矩阵；内参用于后续几何对齐
             with torch.no_grad():  # 位姿网络仅用于推理，不构建计算图，也不更新 PoseNet 参数
                 pose_inputs = [source_image, input_image]  # 按“历史帧、当前帧”的顺序组成待估计位姿的图像对
                 pose_inputs = torch.cat(pose_inputs, 1)  # 沿通道维拼接两帧图像：(B, 3, H, W)×2 → (B, 6, H, W)
@@ -125,15 +134,25 @@ class temporal_encoder(torch.nn.Module):
                 )
 
             # *===========================================#
-            # * Homography warping / feature matching：基于相对位姿和相机内参，将历史特征对齐到当前帧
-            # * 使用ManyDepth风格的resnet18，在1/4尺度的二维图像特征图上，利用相机几何约束进行跨帧特征匹配
-            # * (2) 生成当前帧特征图以及历史帧特征图集合：
-            # * (3) 利用相对相机位姿和一组候选深度假设平面，通过单应性变换构建经过变换的历史帧特征
-            curr_feature, batch_waped_feature  = self.encoder(current_image=input_image, # (1 3 384 1280) # * 当前图像
-                                            lookup_images=source_image.unsqueeze(1),     # (1 1 3 384 1280) # * 历史图像
-                                            poses=pose.unsqueeze(1),                     # (1 1 4 4) * 相对位姿
-                                            K=K,                                         # (1 4 4) * 相机内参
-                                            invK=invK)                                   # (1 4 4) * 逆内参
+            # * 4.7.5 提取二维特征，并按候选深度将历史特征对齐到当前帧
+            # 实现：networks/resnet_encoder.py 的 ResnetEncoderMatching.forward() 与 match_features()
+            # 独立于 PoseNet 的 ResNet18 提取 1/4 尺度特征；当前帧特征 curr_feature=[B,64,96,320]
+            # 对每个候选深度：当前像素反投影 -> 相对位姿变换 -> 投影到历史图 -> grid_sample 采样
+            # 历史对齐特征 [B,D,64,96,320] 沿 64 通道取均值，返回 batch_waped_feature=[B,D,96,320]
+            # D=112 索引深度假设，元素值是采样特征的均值，不是深度值、深度概率或匹配相似度
+            curr_feature, batch_waped_feature  = self.encoder(current_image=input_image, # (1 3 384 1280)，当前图像
+                                            lookup_images=source_image.unsqueeze(1),     # (1 1 3 384 1280)，单张历史图像
+                                            poses=pose.unsqueeze(1),                     # (1 1 4 4)，相对位姿
+                                            K=K,                                         # (1 4 4)，相机内参
+                                            invK=invK)                                   # (1 4 4)，内参伪逆
+            # *----------------------------------------------#
+            # * 4.7.6 将该历史帧的对齐结果写入时序容器
+            # 写入第 temporal 个历史帧槽位，全部历史帧处理后为 [B,T,D,96,320]
+            # 当前 D=112，batch_waped_feature 的第 1 维不是单元素维，因此 squeeze(1) 不改变形状
             combined_waped_feature[:, temporal,:,:,:] = batch_waped_feature.squeeze(1) # (1 3 112 96 320)
 
+        # *==============================================#
+        # * 4.7.7 返回当前帧特征与各历史帧的深度假设对齐特征体
+        # curr_feature 为最后一次循环提取的当前帧特征；combined_waped_feature 保留全部 T 张历史帧的结果
+        # 输出尚未汇聚为 XYZ 体素，后续由调用方进行 ADR 细化、CPA 加权及体素构建
         return  curr_feature, combined_waped_feature # (1 64 96 320) (1 3 112 96 320)

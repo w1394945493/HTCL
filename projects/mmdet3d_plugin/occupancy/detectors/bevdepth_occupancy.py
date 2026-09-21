@@ -106,6 +106,12 @@ class BEVDepthOccupancy(BEVDepth):
 
     @force_fp32()
     def bev_encoder(self, x, depth, temporal_voxel):
+        # *====================================================#
+        # * 5.1 三维主干编码：提取主分支体素的多尺度特征
+        # 当前配置：x=[B,128,128,128,16]，后三维为 XYZ；这里已是体素网格，不再是视锥的 D/H/W
+        # temporal_voxel 是单元素列表，其元素为 [B,384,128,128,16]；depth=[B,112,48,160]
+        # 实现：occupancy/backbones/resnet3d.py 的 CustomResNet3D.forward()
+        # 主干只处理主分支 x，时序信息在下面的 neck 中融合；record_time 分支仅记录 GPU 耗时
         if self.record_time:
             torch.cuda.synchronize()
             t0 = time.time()
@@ -117,6 +123,13 @@ class BEVDepthOccupancy(BEVDepth):
             t1 = time.time()
             self.time_stats['bev_encoder'].append(t1 - t0)
 
+        # *----------------------------------------------------#
+        # * 5.2 多尺度特征融合，并通过体素交叉注意力引入时序内容
+        # 实现：occupancy/necks/second_fpn_3d.py 的 SECONDFPN3D.forward()
+        # neck 将各尺度特征上采样到共同分辨率，每级输出 128 通道，拼接为 [B,384,128,128,16]
+        # 主分支融合特征作为 query，temporal_voxel[0] 提供 key/value，通过 WVA 提取相关历史内容
+        # 残差融合：out = out + alpha * attention_3d(query=out, x=temporal_voxel[0])，alpha 是可学习系数
+        # depth 保留在调用接口中，当前 SECONDFPN3D.forward() 未实际使用它
         x = self.img_bev_encoder_neck(x, depth ,temporal_voxel)
 
         if self.record_time:
@@ -124,6 +137,9 @@ class BEVDepthOccupancy(BEVDepth):
             t2 = time.time()
             self.time_stats['bev_neck'].append(t2 - t1)
 
+        # *----------------------------------------------------#
+        # * 5.3 返回融合后的三维特征列表
+        # 当前 x=[Tensor]，x[0]=[B,384,128,128,16]；供后续占用预测头使用，此处不计算损失
         return x
 
     def extract_img_feat(self, img, img_metas, gt, mode):
@@ -134,18 +150,28 @@ class BEVDepthOccupancy(BEVDepth):
             t0 = time.time()
 
 
-        img_left, img_right = img[0][0], img[1][0]  ### B Temporal N C H W # (1 4 1 3 384 1280) (1 4 1 3 384 1280)
+        # *====================================================#
+        # * 1. 拆分左右相机的当前帧与历史帧
+        # 图像维度为 [B, T, N, C, H, W]；当前配置 T=4，每侧 N=1，最后一帧是参考帧
+        img_left, img_right = img[0][0], img[1][0]  # 左右图像序列均为 [B, 4, 1, 3, 384, 1280]
         B, T, N, C, H, W = img_left.shape # (1 4 1 3 384 1280) 
-        # 取当前帧图像
+        # 当前帧 [B, 1, 3, 384, 1280]；历史帧移除单视角维后为 [B, 3, 3, 384, 1280]
         img_left_ref, img_right_ref = img_left[ :, -1, ... ], img_right[ :, -1, ... ] # (1 1 3 384 1280) (1 1 3 384 1280)
         img_left_sour, img_right_sour = img_left[:,:-1, ... ].squeeze(2).contiguous(), img_right[:,:-1, ... ].squeeze(2).contiguous() # (1 3 3 384 1280)
 
-        # * 仅编码当前参考帧：EfficientNet-B7 + SECONDFPN 对应论文中的图像特征提取网络
+        # img_right_ref 和两个 sour 局部变量后续未直接使用，下游会从完整输入中重新取图像
+
+        # *====================================================#
+        # * 2. 提取当前左图的二维特征，并保留供占用预测头使用
+        # EfficientNet-B7 + SECONDFPN：[B, 1, 3, 384, 1280] -> [B, 1, 640, 48, 160]
         img_left_ref_feature = self.image_encoder( img_left_ref ) # (1 1 640 48 160)
 
         x, x2 = img_left_ref_feature, None
-        img_feats = x.clone()
+        # x2=None 表示此处不编码右图；右图仍会在下游参与双目深度估计
+        img_feats = x.clone()  # 保留二维特征，clone 不会截断梯度
 
+        # img/img2 此后分别指左右相机数据包；filenamesl/r 实际是 RGB 像素序列，并非路径
+        # RGB 序列形状为 [B, T, 384, 1280, 3]，用于下游时序模块
         img, img2 = img[0], img[1]
         filenamesl, filenamesr = img[-1], img2[-1]
 
@@ -155,23 +181,31 @@ class BEVDepthOccupancy(BEVDepth):
             t1 = time.time()
             self.time_stats['img_encoder'].append(t1 - t0)
 
-        # img: imgs, rots, trans, intrins, post_rots, post_trans, gt_depths, sensor2sensors
+        # *====================================================#
+        # * 3. 整理相机几何参数与深度网络的条件输入
+        # rots/trans 为相机到 LiDAR 的变换，intrins 为内参；post_* 与 bda 分别描述图像和 BEV 增强
+        # 数据包：imgs, rots, trans, intrins, post_rots, post_trans, bda, gt_depths, sensor2sensors, calib, RGB序列
         rots, trans, intrins, post_rots, post_trans, bda = img[1:7]
         rots2, trans2, intrins2, post_rots2, post_trans2, bda2 = img2[1:7]
 
 
+        # 将几何参数整理为条件向量，供深度网络使用；几何参数本身也用于后续视锥到体素的映射
         mlp_input = self.img_view_transformer.get_mlp_input(rots, trans, intrins, post_rots, post_trans, bda) # (1 1 30)
         mlp_input2 = self.img_view_transformer.get_mlp_input(rots2, trans2, intrins2, post_rots2, post_trans2, bda2)
 
         geo_inputs = [rots, trans, intrins, post_rots, post_trans, bda, mlp_input]
         geo_inputs2 = [rots2, trans2, intrins2, post_rots2, post_trans2, bda2, mlp_input2]
 
-        calib = img[9]
+        calib = img[9]  # 双目标定量：焦距与基线的乘积，用于视差与深度转换
         
         # *====================================================#
-        # img_view_transformer: ViewTransformerLSSVoxel
-        # 1. 体素特征构建：lift-splat策略
-        # 2. 对齐时序体构建
+        # * 4. 构建主分支体素与对齐后的时序体素：ViewTransformerLiftSplatShootVoxel
+        # 实现文件：projects/mmdet3d_plugin/occupancy/image2bev/ViewTransformerLSSVoxel.py
+        # 下方模块调用进入 ViewTransformerLiftSplatShootVoxel.forward()，在其中完成主分支和时序分支计算
+        # 返回的 bev_feat、depth_prob、temporal_voxel 分别对应此处的 x、depth、temporal_voxel
+        # 主分支：融合双目/单目深度信息，通过 Lift-Splat 得到 x [B, 128, 128, 128, 16]
+        # 时序分支：历史信息对齐、细化和加权，再投影并编码为 temporal_voxel[0] [B, 384, 128, 128, 16]
+        # depth 为离散深度概率 [B, 112, 48, 160]，不是单通道米制深度图
         x, depth, temporal_voxel = self.img_view_transformer([x] + geo_inputs + [x2] + geo_inputs2 + [calib]+ [img, img2], gt, mode, img[0], img2[0], filenamesl, filenamesr)
 
 
@@ -180,10 +214,15 @@ class BEVDepthOccupancy(BEVDepth):
             t2 = time.time()
             self.time_stats['view_transformer'].append(t2 - t1)
 
+        # *====================================================#
+        # * 5. 三维特征编码与时序融合，整理输出
+        # CustomResNet3D + SECONDFPN3D 编码主分支，并在 neck 中通过注意力融入 temporal_voxel
+        # x 为特征列表，x[0] 形状 [B, 384, 128, 128, 16]；空间维度为 X/Y/Z，第一维不是时序长度
         x = self.bev_encoder(x, depth, temporal_voxel)
         if type(x) is not list:
             x = [x]
 
+        # 返回融合体素、深度概率、当前左图二维特征和时序体素；训练损失由 forward_train 计算
         return x, depth, img_feats, temporal_voxel
 
     def extract_feat(self, points, img, img_metas, gt, mode):

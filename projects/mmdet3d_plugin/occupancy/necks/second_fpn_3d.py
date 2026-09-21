@@ -122,26 +122,53 @@ class SECONDFPN3D(BaseModule):
 
     @auto_fp16()
     def forward(self, x, depth, temporal_voxel=None):
-        """Forward function.
+        """Fuse multi-scale voxel features and temporal context.
 
         Args:
-            x (torch.Tensor): 4D Tensor in (N, C, H, W) shape.
+            x (list[torch.Tensor]): Backbone features in (B, C, X, Y, Z).
+            depth (torch.Tensor): Depth probabilities; unused here.
+            temporal_voxel (list[torch.Tensor]): Temporal voxel features.
+                The first element is required by the attention block.
 
         Returns:
-            list[torch.Tensor]: Multi-level feature maps.
+            list[torch.Tensor]: A single fused voxel feature map.
         """
+        # *==============================================#
+        # * 5.2.1 对齐各尺度的空间分辨率与通道数
+        # x 是主干输出的三级特征列表；以下 shape 对应 temporal_baseline_custom.py，后三维是 XYZ
+        # x[0]=[B,128,128,128,16]，x[1]=[B,256,64,64,8]，x[2]=[B,512,32,32,4]
+        # deblocks 在 __init__ 中构建：转置 3D 卷积 + 归一化 + ReLU，当前上采样倍率分别为 1、2、4
+        # 每路统一输出 [B,128,128,128,16]；倍率为 1 的分支保持网格尺寸，仍进行可学习的特征变换
         assert len(x) == len(self.in_channels)
         ups = [deblock(x[i]) for i, deblock in enumerate(self.deblocks)]
 
+        # *----------------------------------------------#
+        # * 5.2.2 沿通道拼接多尺度主分支特征
+        # 三路各 128 通道 -> out=[B,384,128,128,16]；保留不同尺度的信息，不在此对各路求和
+        # 若只有一路则直接使用该路；当前配置为三路
         if len(ups) > 1:
             out = torch.cat(ups, dim=1)
         else:
             out = ups[0]
 
+        # *----------------------------------------------#
+        # * 5.2.3 可选的额外输出上采样
+        # 当前 use_output_upsample=False，跳过；启用时 XYZ 尺寸各扩大 2 倍、通道数不变
+        # checkpoint 通过反向传播时重算该模块，减少需要保存的中间激活
         if self.use_output_upsample:
             out = torch.utils.checkpoint.checkpoint(self.output_deblock, out)
 
-        out = self.alpha * self.attention_3d( query = out,  x = temporal_voxel[0] ) + out  # * Vret = α·CrossAtt(Vvox, Ṽtem) + Vvox
+        # *----------------------------------------------#
+        # * 5.2.4 WVA：通过体素交叉注意力检索时序内容，并残差融合
+        # 实现：同目录 attention_3d.py 的 LinearAttention3D.forward()，由本文件导入；不是 image2bev 中的同名类
+        # query 来自主分支 out，key/value 来自 temporal_voxel[0]；当前两者均为 [B,384,128,128,16]
+        # 主分支决定需要检索什么，时序分支提供内容；注意力输出与 out 同形状，可直接残差相加
+        # alpha 为可学习标量，初始化为 0，使该融合初始输出保持主分支值，再由训练学习时序贡献
+        # alpha 并非固定比例或概率，代码没有限制其取值范围；depth 参数在本方法中未参与计算
+        out = self.alpha * self.attention_3d( query = out,  x = temporal_voxel[0] ) + out  # Vret = alpha * CrossAtt(Vvox, Vtem) + Vvox
 
 
+        # *----------------------------------------------#
+        # * 5.2.5 返回单元素特征列表，供占用预测头使用
+        # [out] 中 out=[B,384,128,128,16]；列表维度不是 batch 或时间维，也不再包含三个尺度
         return [out]

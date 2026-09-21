@@ -108,22 +108,59 @@ class multipatch_affinity(nn.Module):
         return  out
 
 
-# * Affinity-based Dynamic Refinement（ADR）：通过多级可变形卷积细化时序采样位置
+# *==============================================#
+# * 4.8 ADR 的可变形内容分支：多级采样细化与特征融合
+# 整体思路：将 D 个深度假设与图像高度 H、宽度 W 组成三维特征网格，而非实际空间中的 XYZ 体素网格。
+# 在每个 (d,h,w) 位置，将 N 张历史帧的对齐响应组成 N 维特征向量，作为卷积通道；当前 N=3。
+# 因此输入按 [B,C=N,D,H,W] 处理：历史帧位于通道维，不是卷积滑动的时间轴。
+# 用 3D 卷积联合处理邻近深度层和空间邻域，并将各历史帧的响应混合成新的特征通道。
+# 可变形部分只沿高度和宽度调整采样位置；深度方向无额外可学习偏移，但仍读取相邻候选层。
+# 可概括为“固定深度邻域、灵活空间采样”：细化各深度假设下的内容，不修改候选深度值或直接选出深度。
+# 三级串联逐步提取上下文，保留并融合各级输出：[B,N,D,H,W] -> 三级 8 通道 -> 拼接 24 通道 -> outdim 通道。
+# 输出通道是混合后的学习特征，即使 outdim=N，也不再一一对应历史帧；外部再用 CPA 亲和度调制这些内容。
+# 输入是按深度假设对齐的历史特征体；本模块不接收当前帧特征或 CPA 权重
+# 完整的亲和度加权在 ViewTransformerLSSVoxel.py 中完成：CPA 权重乘以此模块输出
 class multipatch_deformable(nn.Module):
-    def __init__( self, indim, outdim ):
+    def __init__( self, indim, outdim ): # outdim=3
         super(multipatch_deformable, self).__init__()
+        # *----------------------------------------------#
+        # * 4.8.1 初始化三级可变形卷积及融合层
+        # 当前 indim=outdim=3，输入 [B,3,D,H,W]；3 是历史帧数，D=112 是深度假设数
+        # 实现：dcn/modules/deform_conv.py 的 DeformConvPack_d，每层从自身输入预测采样偏移
+        # H（Height）是特征图高度，对应上下方向；W（Width）是宽度，对应左右方向
+        # dimension='HW' 表示同时允许高度和宽度方向的偏移，不是二选一；底层 T 轴在这里实际是 D，偏移固定为 0
+        # 3x3x3 核仍会聚合相邻深度层，因此“不学习 D 方向偏移”不等于“不利用深度邻域”
+        # 对输出位置 (d,h,w)，每个核位置采样 (d+kd, h+kh+delta_h, w+kw+delta_w)
+        # kd/kh/kw 是规则核偏移，均取 -1/0/1；delta_h/delta_w 是学习的偏移，没有额外的 delta_d
+        # 因此会从 d-1、d、d+1 层的不同空间位置取特征再组合，不是让 112 个深度层各自独立做二维细化
+        # 被细化的是深度假设下的特征响应；候选深度值 depth_bins 不变，也不在此选择最终深度
+        # 偏移预测层以零权重和零偏置初始化，从规则采样开始学习；stride=1、padding=1 保持 D、H、W 三个维度的尺寸
+        # deformable3/5/7 均使用 3x3x3 核，名称不表示三个不同核大小；串联使后级利用更广的上下文
         self.deformable3 = DeformConvPack_d(indim, 8, kernel_size=[ 3, 3, 3 ], stride=[ 1, 1, 1 ],padding=[ 1, 1, 1 ], dimension='HW' )
         self.deformable5 = DeformConvPack_d(8, 8, kernel_size=[ 3, 3, 3 ], stride=[ 1, 1, 1 ],padding=[ 1, 1, 1 ], dimension='HW' )
         self.deformable7 = DeformConvPack_d(8, 8, kernel_size=[ 3, 3, 3 ], stride=[ 1, 1, 1 ],padding=[ 1, 1, 1 ], dimension='HW' )
         self.deformablefuse = nn.Conv3d(8*3 , outdim, kernel_size=3, stride=1, padding=1 )
     def forward(self, x ):
-        # * 逐级执行三个可变形卷积模块，再拼接并融合各级细化特征
+        # *----------------------------------------------#
+        # * 4.8.2 串联细化历史内容，保留三个层级的输出
+        # 不是三个分支分别处理原始 x：后一级接收前一级结果，并重新预测自己的采样偏移
+        # 可学习采样用于补偿初始几何对齐的不准确，吸收邻域内容；不会直接选择最终深度
+        # 每个深度切片仍是一张含空间变化的历史响应图，即使已沿原始 64 通道取均值，也可继续提取局部模式
+        # 采样发生在输入特征体上，不是重新读取历史 RGB 图；已丢失的通道细节不能由采样直接恢复
+        # 第一级 [B,indim,D,H,W] -> [B,8,D,H,W]，第二、三级均保持 [B,8,D,H,W]
         deformable3 = self.deformable3( x )
         deformable5 = self.deformable5( deformable3 )
         deformable7 = self.deformable7( deformable5 )
+        # *----------------------------------------------#
+        # * 4.8.3 拼接各级特征，通过普通 3D 卷积融合并压缩通道
+        # cat 沿通道维得到 [B,24,D,H,W]，deformablefuse 输出 [B,outdim,D,H,W]
+        # 当前输出 [B,3,112,48,160]；通道已混合历史信息，不再逐通道对应某张历史帧
         out = self.deformablefuse( torch.cat( (deformable3,deformable5,deformable7), dim=1) )
         # out = deformable3
-        return  out
+        # *----------------------------------------------#
+        # * 4.8.4 返回细化后的历史内容，供外部 CPA 权重调制
+        # 输出是特征响应，不是偏移坐标或深度概率；外部加权后再进行时序体编码与体素汇聚
+        return  out # [B,3,112,48,160]
 
 
 # * Weighted Voxel Attention（WVA）所使用的线性 3D 交叉注意力
